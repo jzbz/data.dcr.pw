@@ -57,7 +57,7 @@ Only submit a PR once the intended edits are either done or nearing completion. 
 
 ### Suggested Toolkit
 
-- Go - the [latest release](https://golang.org/doc/install) or the one immediately prior (e.g. 1.21 or 1.20).
+- Go - the [latest release](https://golang.org/doc/install) or the one immediately prior (e.g. 1.27 or 1.26).
 - git client with command line support. [download](https://git-scm.com/downloads)
 - [GitHub](https://github.com/) account
 - Visual Studio Code with Go extension plus `gometalinter`

@@ -565,7 +565,7 @@ func (xc *CommonExchange) UpdateIndices(index CurrencyPair, indices FiatIndices)
 func (xc *CommonExchange) fetch(request *http.Request, response interface{}) (err error) {
 	resp, err := xc.client.Do(request)
 	if err != nil {
-		return fmt.Errorf(fmt.Sprintf("Request failed: %v", err))
+		return fmt.Errorf("Request failed: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -573,7 +573,7 @@ func (xc *CommonExchange) fetch(request *http.Request, response interface{}) (er
 	}
 	err = json.NewDecoder(resp.Body).Decode(response)
 	if err != nil {
-		return fmt.Errorf(fmt.Sprintf("Failed to decode json from %s: %v", request.URL.String(), err))
+		return fmt.Errorf("Failed to decode json from %s: %v", request.URL.String(), err)
 	}
 	return
 }

@@ -6,7 +6,7 @@
 # (views_v2/) and static assets (public/), which dcrdata serves relative to its
 # working directory.
 
-FROM golang:1.23-bookworm AS build
+FROM golang:1.27.1-bookworm AS build
 COPY . /go/src
 WORKDIR /go/src/cmd/dcrdata
 RUN GOTOOLCHAIN=local go build -buildvcs=false -o /dcrdata .

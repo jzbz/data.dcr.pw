@@ -673,7 +673,7 @@ func NewChainDB(ctx context.Context, cfg *ChainDBCfg, stakeDB *stakedb.StakeData
 	log.Infof("Pre-loading unspent ticket info for InsertVote optimization.")
 	unspentTicketCache := NewTicketTxnIDGetter(db)
 	unspentTicketDbIDs, unspentTicketHashes, err := retrieveUnspentTickets(ctx, db)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) && !strings.HasSuffix(err.Error(), "does not exist") {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !errIsNotExist(err) {
 		return nil, err
 	}
 	if len(unspentTicketDbIDs) != 0 {

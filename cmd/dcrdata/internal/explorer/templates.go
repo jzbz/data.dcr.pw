@@ -6,6 +6,7 @@ package explorer
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
 	"math"
@@ -78,7 +79,7 @@ func (t *templates) reloadTemplates() error {
 	if errorStrings == nil {
 		return nil
 	}
-	return fmt.Errorf(strings.Join(errorStrings, " | "))
+	return errors.New(strings.Join(errorStrings, " | "))
 }
 
 // execTemplateToString executes the associated input template using the
