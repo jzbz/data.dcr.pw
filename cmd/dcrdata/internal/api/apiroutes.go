@@ -2086,7 +2086,7 @@ func (c *appContext) ChartTypeData(w http.ResponseWriter, r *http.Request) {
 func downsampleChartJSON(data []byte, maxPoints int) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(data, &obj); err != nil {
-		return data, nil
+		return data, nil //nolint:nilerr // unparseable input is served as-is, as documented above
 	}
 	arrays := make(map[string][]float64)
 	seriesLen := 0
@@ -2130,7 +2130,7 @@ func downsampleChartJSON(data []byte, maxPoints int) ([]byte, error) {
 		}
 		b, err := json.Marshal(out)
 		if err != nil {
-			return data, nil
+			return data, nil //nolint:nilerr // fall back to full resolution rather than fail the request
 		}
 		obj[k] = b
 	}

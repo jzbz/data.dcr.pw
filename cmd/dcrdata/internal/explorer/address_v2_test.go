@@ -73,12 +73,12 @@ func TestV2AddressTemplateRenders(t *testing.T) {
 		// Tx row credit and debit: same exact formatting.
 		"+500<span class=\"frac\">.12<span class=\"frac-x\">345678</span></span><",
 		"120<span class=\"frac\">.50</span><",
-		"Transaction history",                // history section
-		"data-controller=\"chart\"",          // balance-over-time chart
-		"/amountflow/day",                    // chart data source
-		"amt-in",                             // signed incoming amount
-		"amt-out",                            // signed outgoing amount
-		"/tx/",                               // tx links to v2
+		"Transaction history",       // history section
+		"data-controller=\"chart\"", // balance-over-time chart
+		"/amountflow/day",           // chart data source
+		"amt-in",                    // signed incoming amount
+		"amt-out",                   // signed outgoing amount
+		"/tx/",                      // tx links to v2
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered v2 address page missing %q", want)
