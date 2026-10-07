@@ -319,8 +319,13 @@ func MenuFormParser(next http.Handler) http.Handler {
 					http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 					return
 				}
+				// Keep only the path, with its leading slashes collapsed to
+				// one. A path such as "//evil.example", which
+				// "http://a.example//evil.example" parses to, is otherwise a
+				// scheme-relative URL that the browser follows off-site.
+				target := "/" + strings.TrimLeft(URL.EscapedPath(), "/")
 				http.SetCookie(w, cookie)
-				http.Redirect(w, r, URL.EscapedPath(), http.StatusFound)
+				http.Redirect(w, r, target, http.StatusFound)
 				return
 			}
 		}

@@ -81,3 +81,41 @@ func TestMenuFormParser(t *testing.T) {
 		t.Errorf("Location should not have a host, but it was %s", loc.Host)
 	}
 }
+
+// TestMenuFormParserOpenRedirect checks that requestURI cannot steer the
+// redirect off-site. A path with an empty first segment, such as the one
+// "http://a.example//evil.example" parses to, is a scheme-relative URL that a
+// browser resolves against another host (decred/dcrdata#2035).
+func TestMenuFormParserOpenRedirect(t *testing.T) {
+	handler := MenuFormParser(http.NotFoundHandler())
+	for _, requestURI := range []string{
+		"http://a.example//evil.example",
+		"http://a.example//evil.example/path?q=1",
+		"//evil.example",
+		"///evil.example",
+		"/\\evil.example",
+		"\\\\evil.example",
+		"http://a.example/\\evil.example",
+	} {
+		form := url.Values{}
+		form.Add(darkModeFormKey, "1")
+		form.Add(requestURIFormKey, requestURI)
+		r := httptest.NewRequest("POST", "/set", strings.NewReader(form.Encode()))
+		r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+
+		resp := w.Result()
+		if resp.StatusCode == http.StatusBadRequest {
+			continue
+		}
+		loc := resp.Header.Get("Location")
+		if !strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "//") ||
+			strings.HasPrefix(loc, "/\\") {
+			t.Errorf("requestURI %q: redirect Location %q can leave the site", requestURI, loc)
+		}
+		if u, err := url.Parse(loc); err != nil || u.Host != "" || u.Scheme != "" {
+			t.Errorf("requestURI %q: redirect Location %q has a host or scheme", requestURI, loc)
+		}
+	}
+}
