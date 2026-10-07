@@ -62,7 +62,7 @@ The repository ships a [`deploy.sh`](deploy.sh) that performs every step in this
 guide. On a fresh VPS, one line:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jzbz/dcrdata-remix/master/deploy.sh | sudo bash -s -- --domain explorer.example.com
+curl -fsSL https://raw.githubusercontent.com/jzbz/data.dcr.pw/master/deploy.sh | sudo bash -s -- --domain explorer.example.com
 ```
 
 The `-s --` is required: without it `bash` reads `--domain` as its own flag. To
@@ -72,8 +72,8 @@ Or clone first, which lets you read the script before running it and is the
 better choice on a link you don't trust:
 
 ```sh
-git clone https://github.com/jzbz/dcrdata-remix
-sudo ./dcrdata-remix/deploy.sh --domain explorer.example.com
+git clone https://github.com/jzbz/data.dcr.pw
+sudo ./data.dcr.pw/deploy.sh --domain explorer.example.com
 ```
 
 > Piping to `bash` runs whatever arrives, so a connection that drops mid-transfer
@@ -81,7 +81,7 @@ sudo ./dcrdata-remix/deploy.sh --domain explorer.example.com
 > idempotent, so re-running finishes the job — but the clone form avoids the
 > question entirely.
 
-> By default the script deploys `jzbz/dcrdata-remix`. Point `--repo` at a
+> By default the script deploys `jzbz/data.dcr.pw`. Point `--repo` at a
 > different fork to deploy your own build.
 
 It installs Go, PostgreSQL, dcrd, and Caddy; creates the database; builds the
@@ -95,13 +95,24 @@ the new binary into place if the build succeeds — a broken build never takes d
 the running service. (The force-sync discards local edits to tracked files in the
 checkout.)
 
+**Install or upgrade data.dcr.pw.** One line does both: a re-run inherits the
+options recorded by the first run. It downloads the whole script before running
+it, so a dropped connection cannot execute half of it:
+
+```sh
+f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/jzbz/data.dcr.pw/master/deploy.sh -o "$f" && sudo bash "$f" --domain data.dcr.pw; rm -f "$f"
+```
+
+raw.githubusercontent.com can serve the previous `deploy.sh` for a few minutes
+after a push; the code it builds is always fetched fresh from the repository.
+
 Useful flags:
 
 | Flag | Effect |
 | --- | --- |
 | `--domain <host>` | Domain to serve; Caddy provisions a TLS certificate for it. |
 | `--http` | Serve plain HTTP on `:80` (no domain) — handy for testing. |
-| `--repo <url>` | Git repository to deploy (default: `jzbz/dcrdata-remix`). Point at a fork to override. |
+| `--repo <url>` | Git repository to deploy (default: `jzbz/data.dcr.pw`). Point at a fork to override. |
 | `--testnet` | Index testnet instead of mainnet. |
 | `--skip-dcrd` | Don't install dcrd; connect to an existing node (see below). |
 | `--dcrdserv/-user/-pass/-cert` | Coordinates of an existing dcrd (with `--skip-dcrd`). |
@@ -291,7 +302,7 @@ match. With the script: `--skip-dcrd --dcrdserv host:9109 --dcrduser u
 Clone (your fork) into the service user's directory and build the binary:
 
 ```sh
-sudo git clone https://github.com/jzbz/dcrdata-remix /opt/dcrdata/app
+sudo git clone https://github.com/jzbz/data.dcr.pw /opt/dcrdata/app
 cd /opt/dcrdata/app/cmd/dcrdata
 
 sudo /usr/local/go/bin/go build -o /opt/dcrdata/app/cmd/dcrdata/dcrdata .

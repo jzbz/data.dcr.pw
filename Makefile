@@ -1,4 +1,4 @@
-# dcrdata-remix — common developer tasks.
+# data.dcr.pw — common developer tasks.
 #
 # This is a multi-module Go repo. The web explorer binary lives in cmd/dcrdata
 # and serves its assets (public/, views_v2/) relative to its working directory,

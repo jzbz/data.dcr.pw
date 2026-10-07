@@ -1,7 +1,7 @@
 # dcrdata
 
-[![Build Status](https://github.com/jzbz/dcrdata-remix/workflows/Build%20and%20Test/badge.svg)](https://github.com/jzbz/dcrdata-remix/actions)
-[![Latest tag](https://img.shields.io/github/tag/jzbz/dcrdata-remix.svg)](https://github.com/jzbz/dcrdata-remix/tags)
+[![Build Status](https://github.com/jzbz/data.dcr.pw/workflows/Build%20and%20Test/badge.svg)](https://github.com/jzbz/data.dcr.pw/actions)
+[![Latest tag](https://img.shields.io/github/tag/jzbz/data.dcr.pw.svg)](https://github.com/jzbz/data.dcr.pw/tags)
 [![Go Report Card](https://goreportcard.com/badge/github.com/decred/dcrdata)](https://goreportcard.com/report/github.com/decred/dcrdata)
 [![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
 
@@ -166,7 +166,7 @@ NOTE: The following instructions assume a Unix-like shell (e.g. bash).
   this is no longer necessary (or recommend) with Go modules. For example:
 
   ```sh
-  git clone https://github.com/jzbz/dcrdata-remix $HOME/go-work/github/jzbz/dcrdata-remix
+  git clone https://github.com/jzbz/data.dcr.pw $HOME/go-work/github/jzbz/data.dcr.pw
   ```
 
 ### Building dcrdata with Go
@@ -220,7 +220,7 @@ The "public" and "views_v2" folders _must_ be in the same folder as the
 Update the repository:
 
 ```sh
-cd $HOME/go-work/github/jzbz/dcrdata-remix
+cd $HOME/go-work/github/jzbz/data.dcr.pw
 git pull
 ```
 
@@ -699,8 +699,8 @@ of objects implementing the `MempoolDataSaver` interface.
 
 ## Plans
 
-See the GitHub [issue trackers](https://github.com/jzbz/dcrdata-remix/issues) and
-the [project milestones](https://github.com/jzbz/dcrdata-remix/milestones).
+See the GitHub [issue trackers](https://github.com/jzbz/data.dcr.pw/issues) and
+the [project milestones](https://github.com/jzbz/data.dcr.pw/milestones).
 
 ## Contributing
 
@@ -711,7 +711,7 @@ here's the gist of it:
 2. Create a branch for your work (`git checkout -b cool-stuff`).
 3. Code something great.
 4. Commit and push to your repo.
-5. Create a [pull request](https://github.com/jzbz/dcrdata-remix/compare).
+5. Create a [pull request](https://github.com/jzbz/data.dcr.pw/compare).
 
 **DO NOT merge from master to your feature branch; rebase.**
 

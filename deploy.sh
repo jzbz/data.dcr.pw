@@ -19,8 +19,13 @@
 # deploy.sh detects exactly that and performs the one-shot purge the panic
 # asks for. Pass --no-repair to leave it alone.
 #
+# Install or upgrade data.dcr.pw (re-runs inherit the recorded options). The
+# script is downloaded whole before it runs, so a dropped connection cannot
+# execute half of it:
+#   f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/jzbz/data.dcr.pw/master/deploy.sh -o "$f" && sudo bash "$f" --domain data.dcr.pw; rm -f "$f"
+#
 # Usage (run as root or with sudo):
-#   curl -fsSL https://raw.githubusercontent.com/jzbz/dcrdata-remix/master/deploy.sh \
+#   curl -fsSL https://raw.githubusercontent.com/jzbz/data.dcr.pw/master/deploy.sh \
 #     | sudo bash -s -- --domain explorer.example.com
 #   sudo ./deploy.sh --domain explorer.example.com
 #   sudo ./deploy.sh --domain explorer.example.com --repo https://github.com/me/dcrdata
@@ -32,7 +37,7 @@
 # Options:
 #   --domain <host>    Domain to serve (Caddy provisions a TLS cert for it).
 #   --http             Serve plain HTTP on :80 instead of HTTPS (for testing).
-#   --repo <url>       Git repo to deploy        (default: jzbz/dcrdata-remix; use a fork to override).
+#   --repo <url>       Git repo to deploy        (default: jzbz/data.dcr.pw; use a fork to override).
 #   --testnet          Index testnet instead of mainnet.
 #   --skip-dcrd        Do not install dcrd; connect to an existing node.
 #   --dcrdserv <addr>  Existing dcrd RPC host:port (with --skip-dcrd).
@@ -51,10 +56,16 @@ set -euo pipefail
 
 GO_VERSION="1.27.1"
 DCRD_VERSION="latest"
-REPO_URL="https://github.com/jzbz/dcrdata-remix"
+REPO_URL="https://github.com/jzbz/data.dcr.pw"
 # Where this script is served from, quoted in usage when it was piped to bash
 # and so has no readable source of its own to print.
-SELF_URL="https://raw.githubusercontent.com/jzbz/dcrdata-remix/master/deploy.sh"
+SELF_URL="https://raw.githubusercontent.com/jzbz/data.dcr.pw/master/deploy.sh"
+# Earlier URLs of REPO_URL. GitHub redirects them after the rename; deployments
+# that recorded one, or still fetch from one, are moved to REPO_URL.
+RENAMED_REPO_URLS=(
+  "https://github.com/jzbz/dcrdata-remix"
+  "https://github.com/jzbz/dcrdata-remix.git"
+)
 LISTEN="127.0.0.1:7777"
 DOMAIN=""
 HTTP_ONLY=0
@@ -92,6 +103,15 @@ log()  { printf '%s==>%s %s\n' "$C_BLUE" "$C_OFF" "$*"; }
 ok()   { printf '%s  ✓%s %s\n' "$C_GREEN" "$C_OFF" "$*"; }
 warn() { printf '%s  !%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# True when $1 is one of the repository's earlier URLs.
+renamed_repo_url() {
+  local u
+  for u in "${RENAMED_REPO_URLS[@]}"; do
+    [[ "$1" == "$u" ]] && return 0
+  done
+  return 1
+}
 
 # Print the header comment block (everything after the shebang up to the first
 # non-comment line) as usage text. Piped to bash — curl ... | sudo bash — there
@@ -214,7 +234,10 @@ if [[ -f "$STATE_FILE" ]]; then
     DOMAIN="$PREV_DOMAIN"
     [[ "$PREV_HTTP_ONLY" == "1" ]] && HTTP_ONLY=1
   fi
-  [[ $REPO_SET -eq 0 && -n "$PREV_REPO_URL" ]] && REPO_URL="$PREV_REPO_URL"
+  # A recorded earlier name of this repository moves to the current REPO_URL.
+  if [[ $REPO_SET -eq 0 && -n "$PREV_REPO_URL" ]] && ! renamed_repo_url "$PREV_REPO_URL"; then
+    REPO_URL="$PREV_REPO_URL"
+  fi
   [[ $LISTEN_SET -eq 0 && -n "$PREV_LISTEN" ]] && LISTEN="$PREV_LISTEN"
 fi
 
@@ -491,9 +514,11 @@ fi
 if [[ -d "${APP_DIR}/.git" ]]; then
   ACTION="upgrade"
   # Honor an explicit --repo change on upgrades; previously the flag was
-  # silently ignored and the old origin kept being deployed.
+  # silently ignored and the old origin kept being deployed. An origin still
+  # on one of this repository's earlier URLs moves too.
   CUR_ORIGIN=$(sudo -u "$DATA_USER" git -C "$APP_DIR" remote get-url origin)
-  if [[ $REPO_SET -eq 1 && "$CUR_ORIGIN" != "$REPO_URL" ]]; then
+  if [[ "$CUR_ORIGIN" != "$REPO_URL" ]] \
+     && { [[ $REPO_SET -eq 1 ]] || renamed_repo_url "$CUR_ORIGIN"; }; then
     log "Switching deploy repo: ${CUR_ORIGIN} -> ${REPO_URL}"
     sudo -u "$DATA_USER" git -C "$APP_DIR" remote set-url origin "$REPO_URL"
   fi
