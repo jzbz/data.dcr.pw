@@ -117,7 +117,7 @@ Useful flags:
 | `--skip-dcrd` | Don't install dcrd; connect to an existing node (see below). |
 | `--dcrdserv/-user/-pass/-cert` | Coordinates of an existing dcrd (with `--skip-dcrd`). |
 | `--go-version <v>` | Go toolchain version (default `1.27.1`). |
-| `--dcrd-version <v>` | dcrd version to `go install` (default `latest`). |
+| `--dcrd-version <v>` | dcrd module version to `go install` (default `latest`). dcrd 2.1.6 is module `v1.10.8`; its tag, `release-v2.1.6`, works too. |
 | `--no-repair` | Don't repair a desynced stake database; only report it (see [Troubleshooting](#troubleshooting)). |
 
 Run `./deploy.sh --help` for the full list. The rest of this document explains
@@ -158,15 +158,23 @@ install the official toolchain:
 ```sh
 GO_VERSION=1.27.1
 ARCH=$(dpkg --print-architecture)   # amd64 or arm64
-# Use dl.google.com: go.dev/dl answers the .sha256 sidecar with an HTML page.
+case "$ARCH" in   # sha256 from https://go.dev/dl/; deploy.sh pins the same sums
+  amd64) GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;;
+  arm64) GO_SHA256=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;;
+esac
 curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz
-echo "$(curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${ARCH}.tar.gz.sha256" | awk '{print $1}')  /tmp/go.tar.gz" | sha256sum -c -
-sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+# Chained so a mismatch leaves the installed Go alone.
+echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
+  && sudo rm -rf /usr/local/go \
+  && sudo tar -C /usr/local -xzf /tmp/go.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
 export PATH=$PATH:/usr/local/go/bin
 go version
 ```
+
+> The sums are for 1.27.1. For another version, take the sum from
+> [go.dev/dl](https://go.dev/dl/) rather than from the server that sends the
+> tarball.
 
 ---
 
@@ -224,15 +232,14 @@ installed (architecture-independent, always a compatible release):
 ```sh
 sudo useradd --system --create-home --home-dir /opt/dcrd --shell /usr/sbin/nologin dcrd
 sudo GOBIN=/usr/local/bin /usr/local/go/bin/go install github.com/decred/dcrd@latest
-sudo GOBIN=/usr/local/bin /usr/local/go/bin/go install decred.org/dcrctl@latest
+sudo GOBIN=/usr/local/bin /usr/local/go/bin/go install decred.org/dcrctl@release-v2.1.6
 ```
 
 (Both installs run as root: `GOBIN=/usr/local/bin` is not writable by the
-`dcrd` user. `dcrctl` lives in its own module, `decred.org/dcrctl`, not under
-the dcrd module path.)
-
-```sh
-```
+`dcrd` user. dcrd's 2.x releases carry v1 module versions (2.1.6 is
+`v1.10.8`), so `@latest` is the newest release. `dcrctl` lives in its own module,
+`decred.org/dcrctl`, whose `@latest` is still v1.6.2 from 2021; install the
+`release-v` tag matching `dcrd --version`, as `deploy.sh` does.)
 
 Configure it with an RPC user/password and `txindex` (required by dcrdata):
 
@@ -303,10 +310,8 @@ Clone (your fork) into the service user's directory and build the binary:
 
 ```sh
 sudo git clone https://github.com/jzbz/data.dcr.pw /opt/dcrdata/app
-cd /opt/dcrdata/app/cmd/dcrdata
-
-sudo /usr/local/go/bin/go build -o /opt/dcrdata/app/cmd/dcrdata/dcrdata .
-
+# -C instead of cd: /opt/dcrdata may not be readable by your own user.
+sudo /usr/local/go/bin/go build -C /opt/dcrdata/app/cmd/dcrdata -o /opt/dcrdata/app/cmd/dcrdata/dcrdata .
 sudo chown -R dcrdata:dcrdata /opt/dcrdata
 ```
 
@@ -490,15 +495,19 @@ To sit dcrdata behind Cloudflare in production:
 ## 10. Updating to a new version
 
 ```sh
-cd /opt/dcrdata/app
-sudo -u dcrdata git pull
-cd cmd/dcrdata
-sudo -u dcrdata /usr/local/go/bin/go build -o ./dcrdata .
-sudo systemctl restart dcrdata
+# Built as the service user, which owns the checkout, into a new file that is
+# swapped in only if the build succeeds. Chained so a failed step leaves the
+# running binary alone.
+sudo -u dcrdata git -C /opt/dcrdata/app pull \
+  && sudo -u dcrdata env GOTOOLCHAIN=local /usr/local/go/bin/go build -C /opt/dcrdata/app/cmd/dcrdata -o /opt/dcrdata/app/cmd/dcrdata/dcrdata.new . \
+  && sudo -u dcrdata mv -f /opt/dcrdata/app/cmd/dcrdata/dcrdata.new /opt/dcrdata/app/cmd/dcrdata/dcrdata \
+  && sudo systemctl restart dcrdata
 ```
 
 Or just re-run `deploy.sh`, which does all of this idempotently and only swaps in
-the new binary if the build succeeds. Re-runs read the original deployment
+the new binary if the build succeeds. It also rebuilds dcrd at `latest` (or the
+`--dcrd-version` given), restarting it only if the version changed, and upgrades
+Caddy from its apt repository. Re-runs read the original deployment
 choices (network, dcrd topology, domain, repo) from `/etc/default/dcrdata-deploy`,
 so a bare `sudo ./deploy.sh` upgrades in place; passing a conflicting network or
 topology flag aborts with an explanation rather than desyncing the configs from
@@ -514,7 +523,7 @@ the data. A hand-customized `/etc/caddy/Caddyfile` (e.g. the Cloudflare edits in
 | `502 Bad Gateway` | Is dcrdata up? `systemctl status dcrdata`. Listening on `127.0.0.1:7777`? `ss -ltnp \| grep 7777`. |
 | Stuck on the "syncing" page | Normal on first run — initial PostgreSQL indexing is slow. Watch `journalctl -u dcrdata -f`. |
 | dcrdata exits: can't reach dcrd | Is dcrd synced and its RPC up? `dcrctl --rpcserver=127.0.0.1:9109 --rpccert=/opt/dcrd/.dcrd/rpc.cert --rpcuser=… --rpcpass=… getinfo`. Cert path/permissions correct? |
-| dcrdata exits: dcrd version incompatible | Update dcrd (`go install github.com/decred/dcrd@latest`) — dcrdata checks the RPC API version on startup. |
+| dcrdata exits: dcrd version incompatible | Update dcrd: re-run `deploy.sh`, or `sudo GOBIN=/usr/local/bin /usr/local/go/bin/go install github.com/decred/dcrd@latest` and `sudo systemctl restart dcrd`. dcrdata checks the RPC API version on startup and accepts 7.x and 8.x. |
 | `password authentication failed` (PG) | Peer auth needs the OS user and DB role to match (`dcrdata`). Run dcrdata as the `dcrdata` user and connect via `pghost=/run/postgresql`. |
 | dcrdata crash-loops: `The stake database is corrupted` | The stake database fell behind the PostgreSQL index and dcrdata cannot resync past it. Re-run `deploy.sh`: it detects this and purges the few blocks the panic asks for. See below. |
 | Disk filling up | The mainnet PostgreSQL DB is large and grows. Monitor with `df -h` and `du -sh /var/lib/postgresql`. |

@@ -45,7 +45,9 @@
 #   --dcrdpass <pass>  Existing dcrd RPC password  (with --skip-dcrd).
 #   --dcrdcert <path>  Existing dcrd rpc.cert file (with --skip-dcrd).
 #   --go-version <v>   Go toolchain version        (default: 1.27.1).
-#   --dcrd-version <v> dcrd version to go install  (default: latest).
+#   --dcrd-version <v> dcrd module version to go install (default: latest;
+#                      dcrd 2.1.6 is module v1.10.8, or name its tag,
+#                      release-v2.1.6).
 #   --listen <addr>    dcrdata internal listen     (default: 127.0.0.1:7777).
 #   --no-repair        Do not repair a stake-database desync; only report it.
 #   -h, --help         Show this help.
@@ -55,6 +57,12 @@ set -euo pipefail
 # ---- Configuration --------------------------------------------------------
 
 GO_VERSION="1.27.1"
+# sha256 of the official go${GO_VERSION} linux tarballs (https://go.dev/dl/).
+# Bump together with GO_VERSION. A --go-version override is checked against
+# the .sha256 file published beside its tarball instead.
+GO_PINNED_VERSION="${GO_VERSION}"
+GO_SHA256_AMD64="63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
+GO_SHA256_ARM64="3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
 DCRD_VERSION="latest"
 REPO_URL="https://github.com/jzbz/data.dcr.pw"
 # Where this script is served from, quoted in usage when it was piped to bash
@@ -290,8 +298,8 @@ ok "SSH ($(echo "$SSH_PORTS" | tr '\n' ' ' | sed 's/ $//')), 80/tcp and 443/tcp 
 # ---- 3. Go toolchain ------------------------------------------------------
 
 case "$(uname -m)" in
-  x86_64|amd64)  GO_ARCH="amd64" ;;
-  aarch64|arm64) GO_ARCH="arm64" ;;
+  x86_64|amd64)  GO_ARCH="amd64"; GO_SHA256="$GO_SHA256_AMD64" ;;
+  aarch64|arm64) GO_ARCH="arm64"; GO_SHA256="$GO_SHA256_ARM64" ;;
   *)             die "unsupported CPU architecture: $(uname -m)" ;;
 esac
 
@@ -306,11 +314,18 @@ else
   # deploy on a checksum that was never fetched. dl.google.com serves both the
   # tarball and the bare hash, and is where go.dev/dl redirects anyway.
   curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o "${tmp}/go.tar.gz"
-  # Verify against the published checksum: this tarball is extracted as root
-  # and its toolchain builds everything else in the deploy.
-  curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz.sha256" -o "${tmp}/go.tar.gz.sha256"
-  echo "$(awk '{print $1}' "${tmp}/go.tar.gz.sha256")  ${tmp}/go.tar.gz" | sha256sum -c --quiet - \
-    || die "Go tarball sha256 mismatch (go${GO_VERSION}.linux-${GO_ARCH}.tar.gz)"
+  # Verify before the installed toolchain is removed: this tarball is extracted
+  # as root and its toolchain builds everything else in the deploy. The pinned
+  # sum does not come from the server that sent the tarball; the sidecar used
+  # for an override does, so it catches a corrupt download but not a
+  # tampered one.
+  if [[ "$GO_VERSION" != "$GO_PINNED_VERSION" ]]; then
+    warn "No pinned sha256 for Go ${GO_VERSION}; checking the one published beside it"
+    GO_SHA256=$(curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz.sha256" | awk '{print $1}') \
+      || { rm -rf "$tmp"; die "could not fetch the published sha256 for Go ${GO_VERSION}"; }
+  fi
+  echo "${GO_SHA256}  ${tmp}/go.tar.gz" | sha256sum -c --quiet - \
+    || { rm -rf "$tmp"; die "Go tarball sha256 mismatch (go${GO_VERSION}.linux-${GO_ARCH}.tar.gz)"; }
   rm -rf /usr/local/go
   tar -C /usr/local -xzf "${tmp}/go.tar.gz"
   rm -rf "$tmp"
@@ -422,13 +437,18 @@ else
   DCRD_VER_AFTER=$(/usr/local/bin/dcrd --version 2>/dev/null | head -1 || true)
   ok "dcrd installed (${DCRD_VER_AFTER:-$DCRD_VERSION})"
 
-  # dcrctl is an optional admin CLI. It was moved out of the dcrd module into its
-  # own module (decred.org/dcrctl), versioned independently of dcrd — so it is
-  # installed at @latest, not @${DCRD_VERSION}. Best-effort: a hiccup fetching it
-  # must not abort the deploy, since dcrd and dcrdata don't need it to run.
-  log "Installing dcrctl (optional admin CLI)"
-  if GOBIN=/usr/local/bin GOTOOLCHAIN=local "$GO" install "decred.org/dcrctl@latest"; then
-    ok "dcrctl installed"
+  # dcrctl is an optional admin CLI in its own module, decred.org/dcrctl. Its
+  # newest semver tag is v1.6.2 from 2021, so @latest installs that; the
+  # repository instead tags each release in step with dcrd (release-v2.1.6),
+  # so install the tag matching the dcrd just built. Best-effort: a hiccup
+  # fetching it must not abort the deploy, since dcrd and dcrdata don't need it
+  # to run.
+  DCRD_SEMVER=$(sed -n 's/^dcrd version \([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\).*/\1/p' <<<"$DCRD_VER_AFTER")
+  DCRCTL_REF="release-v${DCRD_SEMVER}"
+  [[ -n "$DCRD_SEMVER" ]] || DCRCTL_REF="latest"
+  log "Installing dcrctl ${DCRCTL_REF} (optional admin CLI)"
+  if GOBIN=/usr/local/bin GOTOOLCHAIN=local "$GO" install "decred.org/dcrctl@${DCRCTL_REF}"; then
+    ok "dcrctl installed ($(/usr/local/bin/dcrctl --version 2>/dev/null | head -1 || true))"
   else
     warn "dcrctl install failed (optional); continuing without it"
   fi
@@ -785,7 +805,19 @@ ok "dcrdata service running"
 
 CADDY_FRESH=0
 if command -v caddy >/dev/null 2>&1; then
-  ok "Caddy already installed ($(caddy version | head -1))"
+  # Pick up Caddy releases on re-runs; the lists were refreshed in step 1.
+  # confold keeps the installed Caddyfile instead of stopping at dpkg's
+  # conffile prompt (a managed one is rewritten below anyway). A Caddy that
+  # apt did not install is skipped, not replaced. dcrdata has already been
+  # restarted by now, so a failed upgrade warns rather than aborting before
+  # the Caddyfile and the deployment state are written.
+  if apt-get install -y -qq --only-upgrade \
+       -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+       caddy >/dev/null; then
+    ok "Caddy up to date ($(caddy version | head -1))"
+  else
+    warn "Caddy upgrade failed; continuing with $(caddy version | head -1)"
+  fi
 else
   log "Installing Caddy"
   # --yes: a prior partial run may have left the keyring file behind, and
