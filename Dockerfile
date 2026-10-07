@@ -6,12 +6,12 @@
 # (views_v2/) and static assets (public/), which dcrdata serves relative to its
 # working directory.
 
-FROM golang:1.27.1-bookworm AS build
+FROM golang:1.27.1-trixie AS build
 COPY . /go/src
 WORKDIR /go/src/cmd/dcrdata
 RUN GOTOOLCHAIN=local go build -buildvcs=false -o /dcrdata .
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 # ca-certificates is needed for outbound HTTPS (exchange and Politeia APIs).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \

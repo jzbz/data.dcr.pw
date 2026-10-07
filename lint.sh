@@ -40,7 +40,7 @@ for MODPATH in $MODPATHS; do
     pushd "$module" > /dev/null
     echo "Linting: $MODPATH"
     golangci-lint run
-    if [[ "$GV" =~ ^1.21 ]]; then
+    if [[ "$GV" =~ ^1.27 ]]; then
 		MOD_STATUS=$(git status --porcelain go.mod go.sum)
 		go mod tidy
 		UPDATED_MOD_STATUS=$(git status --porcelain go.mod go.sum)
