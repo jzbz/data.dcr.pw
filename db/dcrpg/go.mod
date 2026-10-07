@@ -6,7 +6,7 @@ replace github.com/decred/dcrdata/v8 => ../../
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/decred/dcrd/blockchain/stake/v5 v5.0.2
+	github.com/decred/dcrd/blockchain/stake/v5 v5.0.3
 	github.com/decred/dcrd/blockchain/standalone/v2 v2.3.0
 	github.com/decred/dcrd/chaincfg/chainhash v1.0.5
 	github.com/decred/dcrd/chaincfg/v3 v3.3.0
@@ -15,7 +15,7 @@ require (
 	github.com/decred/dcrd/rpc/jsonrpc/types/v4 v4.4.0
 	github.com/decred/dcrd/rpcclient/v8 v8.1.0
 	github.com/decred/dcrd/txscript/v4 v4.1.2
-	github.com/decred/dcrd/wire v1.7.5
+	github.com/decred/dcrd/wire v1.8.0
 	github.com/decred/dcrdata/v8 v8.0.0
 	github.com/decred/slog v1.2.0
 	github.com/dustin/go-humanize v1.1.0
@@ -51,6 +51,6 @@ require (
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )

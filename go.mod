@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/decred/base58 v1.0.6
-	github.com/decred/dcrd/blockchain/stake/v5 v5.0.2
+	github.com/decred/dcrd/blockchain/stake/v5 v5.0.3
 	github.com/decred/dcrd/blockchain/standalone/v2 v2.3.0
 	github.com/decred/dcrd/chaincfg/chainhash v1.0.5
 	github.com/decred/dcrd/chaincfg/v3 v3.3.0
@@ -14,7 +14,7 @@ require (
 	github.com/decred/dcrd/rpc/jsonrpc/types/v4 v4.4.0
 	github.com/decred/dcrd/rpcclient/v8 v8.1.0
 	github.com/decred/dcrd/txscript/v4 v4.1.2
-	github.com/decred/dcrd/wire v1.7.5
+	github.com/decred/dcrd/wire v1.8.0
 	github.com/decred/slog v1.2.0
 	github.com/dgraph-io/badger v1.6.2
 	github.com/lib/pq v1.12.3
@@ -36,7 +36,7 @@ require (
 	github.com/decred/dcrd/gcs/v4 v4.1.1 // indirect
 	github.com/decred/go-socks v1.1.0 // indirect
 	github.com/dgraph-io/ristretto v0.0.2 // indirect
-	github.com/dustin/go-humanize v1.0.1-0.20210705192016-249ff6c91207 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
