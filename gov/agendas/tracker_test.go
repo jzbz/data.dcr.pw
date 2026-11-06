@@ -2,6 +2,7 @@ package agendas
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -163,5 +164,66 @@ func TestVoteTracker(t *testing.T) {
 	summary := tracker.Summary()
 	if summary == nil {
 		t.Errorf("nil VoteSummary error")
+	}
+}
+
+// upgradingSourceStub is a dataSourceStub whose latest stake version can be
+// raised, and which can be made to fail with a non-RPC error.
+type upgradingSourceStub struct {
+	dataSourceStub
+	maxVersion uint32
+	fail       error
+}
+
+func (source *upgradingSourceStub) GetVoteInfo(ctx context.Context, version uint32) (*chainjson.GetVoteInfoResult, error) {
+	if source.fail != nil {
+		return nil, source.fail
+	}
+	if version > source.maxVersion {
+		msg := fmt.Sprintf("stake version %d does not exist", version)
+		return nil, dcrjson.NewRPCError(dcrjson.ErrRPCInvalidParameter, msg)
+	}
+	return source.dataSourceStub.GetVoteInfo(ctx, version)
+}
+
+func TestRefreshRCIVersion(t *testing.T) {
+	source := &upgradingSourceStub{maxVersion: 4}
+	tracker, err := NewVoteTracker(chaincfg.MainNetParams(), source, counter)
+	if err != nil {
+		t.Fatalf("NewVoteTracker error: %v", err)
+	}
+	if v := tracker.Version(); v != 4 {
+		t.Fatalf("wrong initial version: wanted 4, got %d", v)
+	}
+
+	// Two new stake versions. The tracker must move to the latest one, not one
+	// past it.
+	source.maxVersion = 6
+	voteInfo, err := tracker.refreshRCI()
+	if err != nil {
+		t.Fatalf("refreshRCI error: %v", err)
+	}
+	if voteInfo.VoteVersion != 6 {
+		t.Errorf("wrong vote info version: wanted 6, got %d", voteInfo.VoteVersion)
+	}
+	if v := tracker.Version(); v != 6 {
+		t.Fatalf("wrong version after upgrade: wanted 6, got %d", v)
+	}
+
+	// Later refreshes still find the latest version.
+	if _, err = tracker.refreshRCI(); err != nil {
+		t.Fatalf("refreshRCI error after upgrade: %v", err)
+	}
+	if v := tracker.Version(); v != 6 {
+		t.Fatalf("wrong version after second refresh: wanted 6, got %d", v)
+	}
+
+	// Other errors are reported, and leave the version alone.
+	source.fail = errors.New("connection refused")
+	if _, err = tracker.refreshRCI(); err == nil {
+		t.Fatalf("expected an error from refreshRCI")
+	}
+	if v := tracker.Version(); v != 6 {
+		t.Fatalf("version changed after a failed refresh: %d", v)
 	}
 }

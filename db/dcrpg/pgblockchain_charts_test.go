@@ -12,7 +12,7 @@ import (
 )
 
 func registerDummyFeeAndPoolInfo(charts *cache.ChartData) {
-	dummyFetcher := func(charts *cache.ChartData) (*sql.Rows, func(), error) {
+	dummyFetcher := func(_ context.Context, charts *cache.ChartData) (*sql.Rows, func(), error) {
 		return nil, func() {}, nil
 	}
 

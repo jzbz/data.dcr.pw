@@ -185,6 +185,13 @@ func (c *client) unsubscribe(msg pstypes.HubMessage) error {
 		if len(c.addrs) == 0 {
 			delete(c.subs, pstypes.SigAddressTx)
 		}
+	case sigNewTxs:
+		delete(c.subs, msg.Signal)
+		// Discard any buffered transactions so they are not sent if the client
+		// subscribes again later.
+		c.newTxs.Lock()
+		c.newTxs.t = make(pstypes.TxList, 0, NewTxBufferSize)
+		c.newTxs.Unlock()
 	default:
 		delete(c.subs, msg.Signal)
 	}
@@ -268,12 +275,25 @@ func (wsh *WebsocketHub) UnregisterClient(ch *clientHubSpoke) {
 	wsh.Unregister <- ch.c
 }
 
+// unregisterGoneClient requests that the run loop unregister a client whose
+// connection handler has finished. The client's killed channel must already be
+// closed so that the run loop is not left waiting on it in unregisterClient.
+// Unlike UnregisterClient, this does not block if the run loop has quit.
+func (wsh *WebsocketHub) unregisterGoneClient(ch *clientHubSpoke) {
+	select {
+	case wsh.Unregister <- ch.c:
+	case <-wsh.killed:
+	}
+}
+
 // unregisterClient should only be called from the loop in run().
 func (wsh *WebsocketHub) unregisterClient(c *hubSpoke) {
 	cl, ok := wsh.clients[c]
 	if !ok {
-		// unknown client, do not close channel
-		log.Warnf("unknown client")
+		// Unknown client, do not close channel. This is expected when the
+		// client was already unregistered by the run loop before its
+		// connection handler requested the same.
+		log.Tracef("unknown client")
 		return
 	}
 	delete(wsh.clients, c)
@@ -535,11 +555,19 @@ func (wsh *WebsocketHub) maybeSendTxns(tx *exptypes.MempoolTx) (someReadyToSend 
 	return
 }
 
-// addTxToBuffer adds a tx to each client's tx buffer. The return boolean value
-// indicates if at least one buffer is ready to be sent.
+// addTxToBuffer adds a tx to the tx buffer of each client subscribed to new
+// transactions. Clients that are not subscribed never have their buffers sent
+// and reset, so they are skipped. The return boolean value indicates if at
+// least one buffer is ready to be sent.
 func (wsh *WebsocketHub) addTxToBuffer(tx *exptypes.MempoolTx) (someReadyToSend bool) {
+	newTxsMsg := pstypes.HubMessage{Signal: sigNewTxs}
 	for _, client := range wsh.clients {
-		someReadyToSend = client.newTxs.addTxToBuffer(tx)
+		if !client.isSubscribed(newTxsMsg) {
+			continue
+		}
+		if client.newTxs.addTxToBuffer(tx) {
+			someReadyToSend = true
+		}
 	}
 	return
 }

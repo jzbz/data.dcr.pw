@@ -8,6 +8,7 @@ import (
 	"database/sql"
 
 	"github.com/decred/dcrdata/db/dcrpg/v8/internal"
+	"github.com/decred/dcrdata/v8/db/dbtypes"
 )
 
 // CheckUnmatchedSpending checks the addresses table for spending rows where the
@@ -49,7 +50,7 @@ func CheckExtraMainchainBlocks(ctx context.Context, db *sql.DB) (ids, heights []
 	defer closeRows(rows)
 
 	for rows.Next() {
-		var hash string
+		var hash dbtypes.ChainHash
 		var id, height uint64
 		err = rows.Scan(&id, &height, &hash)
 		if err != nil {
@@ -57,7 +58,7 @@ func CheckExtraMainchainBlocks(ctx context.Context, db *sql.DB) (ids, heights []
 		}
 		ids = append(ids, id)
 		heights = append(heights, height)
-		hashes = append(hashes, hash)
+		hashes = append(hashes, hash.String())
 	}
 	if err = rows.Err(); err != nil {
 		return nil, nil, nil, err
@@ -77,14 +78,14 @@ func CheckMislabeledInvalidBlocks(ctx context.Context, db *sql.DB) (ids []uint64
 	defer closeRows(rows)
 
 	for rows.Next() {
-		var hash string
+		var hash dbtypes.ChainHash
 		var id uint64
 		err = rows.Scan(&id, &hash)
 		if err != nil {
 			return nil, nil, err
 		}
 		ids = append(ids, id)
-		hashes = append(hashes, hash)
+		hashes = append(hashes, hash.String())
 	}
 	if err = rows.Err(); err != nil {
 		return nil, nil, err
@@ -160,14 +161,14 @@ func CheckMislabeledTicketTransactions(ctx context.Context, db *sql.DB) (ids []u
 	for rows.Next() {
 		var id uint64
 		var txType int16
-		var txHash string
+		var txHash dbtypes.ChainHash
 		err = rows.Scan(&id, &txType, &txHash)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		ids = append(ids, id)
 		txTypes = append(txTypes, txType)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 	}
 	if err = rows.Err(); err != nil {
 		return nil, nil, nil, err
@@ -189,14 +190,14 @@ func CheckMissingTickets(ctx context.Context, db *sql.DB) (ids []uint64, txTypes
 	for rows.Next() {
 		var id uint64
 		var txType int16
-		var txHash string
+		var txHash dbtypes.ChainHash
 		err = rows.Scan(&id, &txType, &txHash)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		ids = append(ids, id)
 		txTypes = append(txTypes, txType)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 	}
 	if err = rows.Err(); err != nil {
 		return nil, nil, nil, err
@@ -217,13 +218,13 @@ func CheckMissingTicketTransactions(ctx context.Context, db *sql.DB) (ids []uint
 
 	for rows.Next() {
 		var id uint64
-		var txHash string
+		var txHash dbtypes.ChainHash
 		err = rows.Scan(&id, &txHash)
 		if err != nil {
 			return nil, nil, err
 		}
 		ids = append(ids, id)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 	}
 	if err = rows.Err(); err != nil {
 		return nil, nil, err
@@ -243,14 +244,14 @@ func CheckBadSpentLiveTickets(ctx context.Context, db *sql.DB) (ids []uint64, tx
 
 	for rows.Next() {
 		var id uint64
-		var txHash string
+		var txHash dbtypes.ChainHash
 		var spendType int16
-		err = rows.Scan(&id, &txHash)
+		err = rows.Scan(&id, &txHash, &spendType)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		ids = append(ids, id)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 		spendTypes = append(spendTypes, spendType)
 	}
 	if err = rows.Err(); err != nil {
@@ -271,14 +272,14 @@ func CheckBadVotedTickets(ctx context.Context, db *sql.DB) (ids []uint64, txHash
 
 	for rows.Next() {
 		var id uint64
-		var txHash string
+		var txHash dbtypes.ChainHash
 		var spendType int16
-		err = rows.Scan(&id, &txHash)
+		err = rows.Scan(&id, &txHash, &spendType)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		ids = append(ids, id)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 		spendTypes = append(spendTypes, spendType)
 	}
 	if err = rows.Err(); err != nil {
@@ -299,14 +300,14 @@ func CheckBadExpiredVotedTickets(ctx context.Context, db *sql.DB) (ids []uint64,
 
 	for rows.Next() {
 		var id uint64
-		var txHash string
+		var txHash dbtypes.ChainHash
 		var spendType int16
-		err = rows.Scan(&id, &txHash)
+		err = rows.Scan(&id, &txHash, &spendType)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		ids = append(ids, id)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 		spendTypes = append(spendTypes, spendType)
 	}
 	if err = rows.Err(); err != nil {
@@ -327,14 +328,14 @@ func CheckBadMissedVotedTickets(ctx context.Context, db *sql.DB) (ids []uint64, 
 
 	for rows.Next() {
 		var id uint64
-		var txHash string
+		var txHash dbtypes.ChainHash
 		var spendType int16
-		err = rows.Scan(&id, &txHash)
+		err = rows.Scan(&id, &txHash, &spendType)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		ids = append(ids, id)
-		txHashes = append(txHashes, txHash)
+		txHashes = append(txHashes, txHash.String())
 		spendTypes = append(spendTypes, spendType)
 	}
 	if err = rows.Err(); err != nil {
@@ -354,15 +355,15 @@ func CheckBadBlockApproval(ctx context.Context, db *sql.DB) (hashes []string, ap
 	defer closeRows(rows)
 
 	for rows.Next() {
-		var hash string
+		var hash dbtypes.ChainHash
 		var appr, disappr, tot int16
 		var apprAct, apprSet bool
-		err = rows.Scan(&hash, appr, disappr, tot, apprAct, apprSet)
+		err = rows.Scan(&hash, &appr, &disappr, &tot, &apprAct, &apprSet)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, err
 		}
 
-		hashes = append(hashes, hash)
+		hashes = append(hashes, hash.String())
 		approvals = append(approvals, appr)
 		disapprovals = append(disapprovals, disappr)
 		totals = append(totals, tot)

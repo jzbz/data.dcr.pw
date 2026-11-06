@@ -32,6 +32,11 @@ const (
 	defaultDCRRatesPort = "7778"
 
 	orderbookKey = "depth"
+
+	// exchangeRequestTimeout bounds an entire exchange API request, including
+	// reading the response body, so that an unresponsive exchange is marked
+	// failed rather than leaving its refresh blocked indefinitely.
+	exchangeRequestTimeout = 30 * time.Second
 )
 
 // ExchangeBotConfig is the configuration options for ExchangeBot.
@@ -72,11 +77,16 @@ type ExchangeBot struct {
 	// is updated by ExchangeBot, and a copy stored in stateCopy. After creation,
 	// stateCopy will never be updated, so can be used read-only by multiple
 	// threads.
-	stateCopy         *ExchangeBotState
-	currentStateBytes []byte
-	DataExpiry        time.Duration
-	RequestExpiry     time.Duration
-	minTick           time.Duration
+	stateCopy *ExchangeBotState
+	// stateBytes caches the JSON encoding of stateBytesFor, which is the
+	// stateCopy that was current when StateBytes was last called. The encoding
+	// is done on demand rather than on every update.
+	stateBytesMtx sync.Mutex
+	stateBytes    []byte
+	stateBytesFor *ExchangeBotState
+	DataExpiry    time.Duration
+	RequestExpiry time.Duration
+	minTick       time.Duration
 	// A gRPC connection
 	masterConnection *grpc.ClientConn
 	TLSCredentials   credentials.TransportCredentials
@@ -333,18 +343,17 @@ func NewExchangeBot(config *ExchangeBotConfig) (*ExchangeBot, error) {
 			DCRExchanges: make(map[string]map[CurrencyPair]*ExchangeState),
 			FiatIndices:  make(map[string]map[CurrencyPair]*ExchangeState),
 		},
-		currentStateBytes: []byte{},
-		DataExpiry:        dataExpiry,
-		RequestExpiry:     requestExpiry,
-		minTick:           5 * time.Second,
-		updateChans:       []chan *ExchangeUpdate{},
-		indexChans:        []chan *IndexUpdate{},
-		quitChans:         []chan struct{}{},
-		exchangeChan:      make(chan *ExchangeUpdate, 16),
-		indexChan:         make(chan *IndexUpdate, 16),
-		client:            new(http.Client),
-		config:            config,
-		failed:            false,
+		DataExpiry:    dataExpiry,
+		RequestExpiry: requestExpiry,
+		minTick:       5 * time.Second,
+		updateChans:   []chan *ExchangeUpdate{},
+		indexChans:    []chan *IndexUpdate{},
+		quitChans:     []chan struct{}{},
+		exchangeChan:  make(chan *ExchangeUpdate, 16),
+		indexChan:     make(chan *IndexUpdate, 16),
+		client:        &http.Client{Timeout: exchangeRequestTimeout},
+		config:        config,
+		failed:        false,
 	}
 
 	/* TODO: specify proxy
@@ -480,20 +489,27 @@ func (bot *ExchangeBot) Start(ctx context.Context, wg *sync.WaitGroup) {
 						continue
 					}
 					// Send the update through the Exchange so that appropriate
-					// attributes are set.
+					// attributes are set. Updates for an exchange that is not
+					// enabled here, e.g. one that is disabled in this bot's
+					// configuration, are dropped.
+					xc, found := bot.Exchanges[update.Token]
+					if !found {
+						log.Debugf("Ignoring DCRRates update for unmonitored exchange %q", update.Token)
+						continue
+					}
 					if IsDcrExchange(update.Token) {
 						currencyPair, state := exchangeStateFromProto(update)
 						if !currencyPair.IsValidDCRPair() {
 							log.Errorf("Received update for unknown currency pair %s", currencyPair)
 						} else {
-							bot.Exchanges[update.Token].Update(currencyPair, state)
+							xc.Update(currencyPair, state)
 						}
 					} else if IsIndex(update.Token) {
 						currencyIndex := CurrencyPair(update.GetCurrencyPair())
 						if !currencyIndex.IsValidIndex() {
 							log.Errorf("Received update for unknown index %s", currencyIndex)
 						} else {
-							bot.Exchanges[update.Token].UpdateIndices(currencyIndex, update.GetIndices())
+							xc.UpdateIndices(currencyIndex, update.GetIndices())
 						}
 					}
 				}
@@ -674,7 +690,6 @@ func (bot *ExchangeBot) ConvertedState(code string) (*ExchangeBotState, error) {
 	dcrPrice, volume := bot.dcrPriceAndVolume(code)
 	btcPrice := bot.indexPrice(BTCIndex, code)
 	if dcrPrice == 0 || btcPrice == 0 {
-		bot.failed = true
 		return nil, fmt.Errorf("Unable to process price for currency %s", code)
 	}
 
@@ -682,7 +697,7 @@ func (bot *ExchangeBot) ConvertedState(code string) (*ExchangeBotState, error) {
 		Index:        code,
 		Volume:       volume,
 		Price:        dcrPrice,
-		BtcPrice:     dcrPrice,
+		BtcPrice:     btcPrice,
 		DCRExchanges: bot.currentState.DCRExchanges,
 		FiatIndices:  bot.indicesForCode(code),
 	}
@@ -729,7 +744,6 @@ func (bot *ExchangeBot) ConvertedRates(code string) (*ExchangeRates, error) {
 	dcrPrice, _ := bot.dcrPriceAndVolume(code)
 	btcPrice := bot.indexPrice(BTCIndex, code)
 	if btcPrice == 0 || dcrPrice == 0 {
-		bot.failed = true
 		return nil, fmt.Errorf("Unable to process price for currency %s", code)
 	}
 
@@ -740,11 +754,25 @@ func (bot *ExchangeBot) ConvertedRates(code string) (*ExchangeRates, error) {
 	}, nil
 }
 
-// StateBytes is a JSON-encoded byte array of the currentState.
+// StateBytes is a JSON-encoded byte array of the currentState. The encoding
+// is cached until the next state update.
 func (bot *ExchangeBot) StateBytes() []byte {
-	bot.mtx.RLock()
-	defer bot.mtx.RUnlock()
-	return bot.currentStateBytes
+	state := bot.State()
+	if state == nil {
+		return []byte{}
+	}
+	bot.stateBytesMtx.Lock()
+	defer bot.stateBytesMtx.Unlock()
+	if state == bot.stateBytesFor {
+		return bot.stateBytes
+	}
+	b, err := bot.encodeJSON(state)
+	if err != nil {
+		log.Errorf("Failed to encode exchange bot state: %v", err)
+		return bot.stateBytes
+	}
+	bot.stateBytes, bot.stateBytesFor = b, state
+	return b
 }
 
 // Encodes the thing as JSON, with indentation if configured.
@@ -959,17 +987,6 @@ func (bot *ExchangeBot) updateState() error {
 		bot.currentState.Volume = volume
 	}
 
-	var jsonBytes []byte
-	var err error
-	if bot.config.Indent {
-		jsonBytes, err = json.MarshalIndent(bot.currentState, "", "    ")
-	} else {
-		jsonBytes, err = json.Marshal(bot.currentState)
-	}
-	if err != nil {
-		return fmt.Errorf("Failed to write bytes: %v", err)
-	}
-	bot.currentStateBytes = jsonBytes
 	bot.stateCopy = bot.currentState.copy()
 
 	return nil

@@ -101,6 +101,11 @@ func mainCore() int {
 			fmt.Printf("%d\n", msgBlock.Header.Height)
 		}
 
+		if len(msgBlock.Transactions) == 0 {
+			fmt.Fprintf(os.Stderr, "ERROR: block %s has no transactions\n", blockhash)
+			return 4
+		}
+
 		// Check all regular tree txns except coinbase.
 		for _, tx := range msgBlock.Transactions[1:] {
 			swapRes, err := txhelpers.MsgTxAtomicSwapsInfo(tx, nil, params)

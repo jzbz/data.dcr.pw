@@ -1016,26 +1016,22 @@ clearingaddrs:
 	}
 
 	// If the cache is at or above row capacity, remove cache items to make room
-	// for the given number of rows.
+	// for the given number of rows. The totals are adjusted as items are
+	// removed rather than recounted, and the loop ends when no item with rows
+	// other than the project fund address remains.
 	addrsCached, cacheSize, _ := ac.length()
-clearing:
-	for cacheSize > 0 && cacheSize+numRows > ac.cap {
-		for a, aaci := range ac.a {
-			// nothing much to clear for this cached item
-			if len(aaci.rows) == 0 {
-				continue
-			}
-			// Never purge the data for the project fund address.
-			if a == ac.ProjectAddress {
-				if len(ac.a) == 1 {
-					break clearing
-				}
-				continue
-			}
-			delete(ac.a, a)
-			break // recheck cacheSize
+	for a, aaci := range ac.a {
+		if cacheSize == 0 || cacheSize+numRows <= ac.cap {
+			break
 		}
-		addrsCached, cacheSize, _ = ac.length()
+		// Nothing much to clear for this cached item, and never purge the data
+		// for the project fund address.
+		if len(aaci.rows) == 0 || a == ac.ProjectAddress {
+			continue
+		}
+		cacheSize -= len(aaci.rows)
+		addrsCached--
+		delete(ac.a, a)
 	}
 
 	return cacheSize+numRows <= ac.cap && addrsCached < ac.capAddr // addrsCached+1 <= ac.capAddr

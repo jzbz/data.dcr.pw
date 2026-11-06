@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v4"
@@ -280,5 +281,141 @@ func TestSignalReorgHandlerFailure(t *testing.T) {
 	if n.previous.hash != prev || n.previous.height != 99 {
 		t.Errorf("new chain head recorded despite a handler failure: got (%v, %d), want (%v, 99)",
 			n.previous.hash, n.previous.height, prev)
+	}
+}
+
+// TestProcessBlockDeadline covers a block handler group that is still running
+// at the deadline. The block cannot be recorded as connected, so without the
+// fatal handler the Notifier would silently reject every later block.
+func TestProcessBlockDeadline(t *testing.T) {
+	prev := hashFrom(0xef)
+	n := NewNotifier()
+	n.deadline = 20 * time.Millisecond
+	n.previous.hash = prev
+	n.previous.height = 99
+
+	release := make(chan struct{})
+	defer close(release)
+	var fatalCalls atomic.Int32
+	var secondRan atomic.Bool
+	n.SetFatalHandler(func() { fatalCalls.Add(1) })
+	n.RegisterBlockHandlerGroup(func(*wire.BlockHeader) error {
+		<-release
+		return nil
+	})
+	n.RegisterBlockHandlerGroup(func(*wire.BlockHeader) error {
+		secondRan.Store(true)
+		return nil
+	})
+
+	n.processBlock(&wire.BlockHeader{PrevBlock: prev, Height: 100})
+
+	if got := fatalCalls.Load(); got != 1 {
+		t.Errorf("fatal handler called %d times after a deadline expiry, want 1", got)
+	}
+	if secondRan.Load() {
+		t.Error("second handler group ran after the first missed the deadline")
+	}
+	if n.previous.hash != prev || n.previous.height != 99 {
+		t.Errorf("block recorded as connected despite a deadline expiry: got (%v, %d), want (%v, 99)",
+			n.previous.hash, n.previous.height, prev)
+	}
+}
+
+// TestSignalReorgDeadline is the same guarantee for the reorg path.
+func TestSignalReorgDeadline(t *testing.T) {
+	n := NewNotifier()
+	n.node = &dummyNode{}
+	n.deadline = 20 * time.Millisecond
+	prev := hashFrom(0xce)
+	n.previous.hash = prev
+	n.previous.height = 99
+
+	release := make(chan struct{})
+	defer close(release)
+	var fatalCalls atomic.Int32
+	n.SetFatalHandler(func() { fatalCalls.Add(1) })
+	n.RegisterReorgHandlerGroup(func(*txhelpers.ReorgData) error {
+		<-release
+		return nil
+	})
+
+	n.signalReorg(BranchTips{
+		OldChainHead:   hashFrom(0x01),
+		OldChainHeight: 100,
+		NewChainHead:   hashFrom(0x02),
+		NewChainHeight: 100,
+	})
+
+	if got := fatalCalls.Load(); got != 1 {
+		t.Errorf("fatal handler called %d times after a deadline expiry, want 1", got)
+	}
+	if n.previous.hash != prev || n.previous.height != 99 {
+		t.Errorf("new chain head recorded despite a deadline expiry: got (%v, %d), want (%v, 99)",
+			n.previous.hash, n.previous.height, prev)
+	}
+}
+
+// TestNtfnQueueNeverBlocks covers the dcrd callbacks, which run on the
+// rpcclient goroutine that also delivers every RPC response. With nothing
+// draining the queue, a full load of transactions must not block the caller,
+// excess transactions must be dropped, and blocks must still be queued, in
+// order, behind the transactions that were accepted.
+func TestNtfnQueueNeverBlocks(t *testing.T) {
+	n := NewNotifier()
+	signals := n.DcrdHandlers()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < maxQueuedTxns+100; i++ {
+			signals.OnTxAcceptedVerbose(&chainjson.TxRawResult{Txid: "tx"})
+		}
+		header := wire.BlockHeader{Height: 7}
+		b, _ := header.Bytes()
+		signals.OnBlockConnected(b, nil)
+		signals.OnReorganization(&chainhash.Hash{1}, 7, &chainhash.Hash{2}, 7)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("notification callbacks blocked on a full queue")
+	}
+
+	if queued := n.anyQ.push(&chainjson.TxRawResult{}); queued {
+		t.Error("transaction accepted into a queue already holding maxQueuedTxns transactions")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < maxQueuedTxns; i++ {
+		item, ok := n.anyQ.pop(ctx)
+		if !ok {
+			t.Fatalf("queue empty after %d transactions", i)
+		}
+		if _, isTx := item.(*chainjson.TxRawResult); !isTx {
+			t.Fatalf("item %d is %T, want a transaction", i, item)
+		}
+	}
+	if item, _ := n.anyQ.pop(ctx); item == nil {
+		t.Fatal("block was not queued")
+	} else if bh, ok := item.(*wire.BlockHeader); !ok || bh.Height != 7 {
+		t.Fatalf("got %T after the transactions, want the block header", item)
+	}
+	if item, _ := n.anyQ.pop(ctx); item == nil {
+		t.Fatal("reorg was not queued")
+	} else if _, ok := item.(BranchTips); !ok {
+		t.Fatalf("got %T after the block, want the reorg", item)
+	}
+
+	// With room again, transactions are accepted.
+	if !n.anyQ.push(&chainjson.TxRawResult{}) {
+		t.Error("transaction dropped from a drained queue")
+	}
+
+	// pop gives up once the context is done.
+	cancel()
+	if _, ok := n.anyQ.pop(ctx); ok {
+		t.Error("pop returned an item after the context was cancelled")
 	}
 }

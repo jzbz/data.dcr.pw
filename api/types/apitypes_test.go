@@ -188,3 +188,28 @@ func TestTimeAPI_MarshalUnmarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusDBUpdateReady(t *testing.T) {
+	s := NewStatus(100, 8, 1, "test", "testnet")
+	s.DBUpdate(100, 0)
+	if !s.Ready() {
+		t.Fatal("not ready at node height with connections")
+	}
+
+	s.SetConnections(0)
+	if s.Ready() {
+		t.Fatal("ready with no node connections")
+	}
+	// A DB update at the node height must not make it ready again while the
+	// node has no connections.
+	s.DBUpdate(100, 0)
+	if s.Ready() {
+		t.Fatal("DBUpdate set ready with no node connections")
+	}
+
+	s.SetConnections(8)
+	s.SetHeight(100)
+	if !s.Ready() {
+		t.Fatal("not ready after connections were restored")
+	}
+}

@@ -5,10 +5,12 @@ package agendas
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrjson/v4"
 	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v4"
 )
 
@@ -217,18 +219,22 @@ func (tracker *VoteTracker) Version() uint32 {
 // will be updated with other fields under mutex lock in VoteTracker.update.
 func (tracker *VoteTracker) refreshRCI() (*chainjson.GetVoteInfoResult, error) {
 	oldVersion := tracker.Version()
-	v := oldVersion
-	var err error
-	var voteInfo, vinfo *chainjson.GetVoteInfoResult
+	latestVersion := oldVersion
+	var voteInfo *chainjson.GetVoteInfoResult
 
-	// Retrieves the voteinfo for the last stake version supported.
-	for {
-		vinfo, err = tracker.node.GetVoteInfo(context.TODO(), v)
+	// Retrieves the voteinfo for the last stake version supported. dcrd
+	// reports an invalid parameter for a version past the latest one. Any other
+	// error means the latest version is not known.
+	for v := oldVersion; ; v++ {
+		vinfo, err := tracker.node.GetVoteInfo(context.TODO(), v)
 		if err != nil {
-			break
+			var jerr *dcrjson.RPCError
+			if errors.As(err, &jerr) && jerr.Code == dcrjson.ErrRPCInvalidParameter {
+				break
+			}
+			return nil, fmt.Errorf("refreshRCI: GetVoteInfo(%d) failed: %w", v, err)
 		}
-		voteInfo = vinfo
-		v++
+		voteInfo, latestVersion = vinfo, v
 	}
 
 	if voteInfo == nil {
@@ -237,11 +243,11 @@ func (tracker *VoteTracker) refreshRCI() (*chainjson.GetVoteInfoResult, error) {
 			log.Info("No agenda information retrieved from dcrd.")
 			return nil, nil
 		}
-		return nil, fmt.Errorf("refreshRCI: Vote information not found: %v", err)
+		return nil, fmt.Errorf("refreshRCI: Vote information not found for version %d", oldVersion)
 	}
-	if v > oldVersion+1 {
+	if latestVersion > oldVersion {
 		tracker.mtx.Lock()
-		tracker.version = v
+		tracker.version = latestVersion
 		tracker.mtx.Unlock()
 	}
 	return voteInfo, nil

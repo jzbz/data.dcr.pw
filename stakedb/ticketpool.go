@@ -426,6 +426,15 @@ func loadAllPoolDiffsV1(db *badger.DB) ([]PoolDiff, []uint64, error) {
 					key, height, errTx)
 			}
 
+			// The value is an 8-byte In count, the In hashes, an 8-byte Out
+			// count, and the Out hashes. Bound both counts by the value size
+			// before using them as an offset or an allocation size.
+			valLen := uint64(hashReader.Len())
+			if valLen < 16 || (valLen-16)%chainhash.HashSize != 0 {
+				return fmt.Errorf("pool diff at height %d has invalid length %d", height, valLen)
+			}
+			numHashes := (valLen - 16) / chainhash.HashSize
+
 			// Number of hashes in.
 			var inLenBytes [8]byte
 			n, err := hashReader.Read(inLenBytes[:])
@@ -436,6 +445,10 @@ func loadAllPoolDiffsV1(db *badger.DB) ([]PoolDiff, []uint64, error) {
 				return fmt.Errorf("failed to ready 8-bytes of In length, got %d", n)
 			}
 			inLen := binary.BigEndian.Uint64(inLenBytes[:])
+			if inLen > numHashes {
+				return fmt.Errorf("pool diff at height %d has In length %d, but only %d hashes fit",
+					height, inLen, numHashes)
+			}
 
 			// Number of hashes out, skipping over the input hashes themselves.
 			var outLenBytes [8]byte
@@ -447,6 +460,10 @@ func loadAllPoolDiffsV1(db *badger.DB) ([]PoolDiff, []uint64, error) {
 				return fmt.Errorf("failed to ready 8-bytes of Out length, got %d", n)
 			}
 			outLen := binary.BigEndian.Uint64(outLenBytes[:])
+			if outLen != numHashes-inLen {
+				return fmt.Errorf("pool diff at height %d has Out length %d, expected %d",
+					height, outLen, numHashes-inLen)
+			}
 
 			poolDiff := PoolDiff{
 				In:  make([]chainhash.Hash, inLen),
@@ -459,7 +476,7 @@ func loadAllPoolDiffsV1(db *badger.DB) ([]PoolDiff, []uint64, error) {
 					return fmt.Errorf("failed to ready In[%d] Hash: %w", i, err)
 				}
 				if n != chainhash.HashSize {
-					return fmt.Errorf("failed to ready %-bytes of In Hash, got %d", chainhash.HashSize, n)
+					return fmt.Errorf("failed to read %d bytes of In Hash, got %d", chainhash.HashSize, n)
 				}
 			}
 
@@ -474,7 +491,7 @@ func loadAllPoolDiffsV1(db *badger.DB) ([]PoolDiff, []uint64, error) {
 					return fmt.Errorf("failed to ready Out[%d] Hash: %w", i, err)
 				}
 				if n != chainhash.HashSize {
-					return fmt.Errorf("failed to ready %-bytes of Out Hash, got %d", chainhash.HashSize, n)
+					return fmt.Errorf("failed to read %d bytes of Out Hash, got %d", chainhash.HashSize, n)
 				}
 			}
 
@@ -644,29 +661,36 @@ func (tp *TicketPool) storeDiff(diff *PoolDiff, height int64) error {
 	return storeDiff(tp.diffDB, diff, uint64(height))
 }
 
-// Append grows the diffs slice with the specified diff, and stores it in the
-// on-disk DB. The height of the diff is used to check that it builds on the
-// chain tip, and as a primary key in the DB.
-func (tp *TicketPool) Append(diff *PoolDiff, height int64) error {
+// storeAndAppend stores the diff in the on-disk DB, and only if that succeeds
+// grows the diffs slice, so that a failed write leaves the in-memory state
+// unchanged. The height of the diff is used to check that it builds on the
+// chain tip, and as a primary key in the DB. The caller must hold tp.mtx.
+func (tp *TicketPool) storeAndAppend(diff *PoolDiff, height int64) error {
 	if height != tp.tip+1 {
 		return fmt.Errorf("block height %d does not build on %d", height, tp.tip)
 	}
-	tp.mtx.Lock()
-	defer tp.mtx.Unlock()
+	if err := tp.storeDiff(diff, height); err != nil {
+		return err
+	}
 	tp.append(diff)
-	return tp.storeDiff(diff, height)
+	return nil
 }
 
-// AppendAndAdvancePool functions like Append, except that after growing the
-// diffs slice and storing the diff in DB, the ticket pool is advanced.
-func (tp *TicketPool) AppendAndAdvancePool(diff *PoolDiff, height int64) error {
-	if height != tp.tip+1 {
-		return fmt.Errorf("block height %d does not build on %d", height, tp.tip)
-	}
+// Append stores the specified diff in the on-disk DB, and grows the diffs slice
+// with it. The height of the diff is used to check that it builds on the chain
+// tip, and as a primary key in the DB.
+func (tp *TicketPool) Append(diff *PoolDiff, height int64) error {
 	tp.mtx.Lock()
 	defer tp.mtx.Unlock()
-	tp.append(diff)
-	if err := tp.storeDiff(diff, height); err != nil {
+	return tp.storeAndAppend(diff, height)
+}
+
+// AppendAndAdvancePool functions like Append, except that after storing the
+// diff in DB and growing the diffs slice, the ticket pool is advanced.
+func (tp *TicketPool) AppendAndAdvancePool(diff *PoolDiff, height int64) error {
+	tp.mtx.Lock()
+	defer tp.mtx.Unlock()
+	if err := tp.storeAndAppend(diff, height); err != nil {
 		return err
 	}
 	return tp.advance()

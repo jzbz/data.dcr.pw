@@ -232,8 +232,8 @@ const (
 	SelectVoutAddressesByTxOut = `SELECT id, script_addresses, value, mixed FROM vouts
 		WHERE tx_hash = $1 AND tx_index = $2 AND tx_tree = $3;`
 
-	SelectVoutByID = `SELECT id, tx_hash, tx_index, tx_tree, is_valid, is_mainchain,
-			block_time, prev_tx_hash, prev_tx_index, prev_tx_tree, value_in, tx_type
+	SelectVoutByID = `SELECT id, tx_hash, tx_index, tx_tree, value, version,
+			script_type, script_addresses, mixed, spend_tx_row_id
 		FROM vouts WHERE id=$1;`
 
 	// TEST ONLY REMOVE

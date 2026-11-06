@@ -43,7 +43,7 @@ configuration.
     --loglevel=          Logging level {trace, debug, info, warn, error, critical}
     --disable-exchange=  Exchanges to disable. See /exchanges/exchanges.go for available exchanges. Use a comma to separate multiple exchanges
     --exchange-currency= The default bitcoin price index. A 3-letter currency code. (default: USD)
-    --exchange-refresh=  Time between API calls for exchange data. See (ExchangeBotConfig).DataExpiry. (default: 20m)
+    --exchange-refresh=  Time between API calls for exchange data. See (ExchangeBotConfig).DataExpiry. (default: 5m)
     --exchange-expiry=   Maximum age before exchange data is discarded. See (ExchangeBotConfig).RequestExpiry. (default: 60m)
     --tlscert=           Path to the TLS certificate. Will be created if it doesn't already exist. ([appdir]/rpc.cert)
     --tlskey=            Path to the TLS key. Will be created if it doesn't already exist. ([appdir]/rpc.key)

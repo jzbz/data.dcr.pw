@@ -3,6 +3,7 @@
 package dcrpg
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -18,7 +19,7 @@ func TestGetAddressTransactionsRawWithSkip(t *testing.T) {
 	a := "Dsnm5MaPtic52uveAP6savT8hkSHttAFpvv" // stakesubmission (ticket) and vote
 	// a := "DsSWTHFrsXV77SwAcMe451kJTwWjwPYjWTM" // miner with coinbases
 	t0 := time.Now()
-	res := db.GetAddressTransactionsRawWithSkip(a, 1000, 0)
+	res := db.GetAddressTransactionsRawWithSkip(context.Background(), a, 1000, 0)
 	d := time.Since(t0)
 	// spew.Dump(res)
 
@@ -31,7 +32,7 @@ func TestGetAddressTransactionsRawWithSkip(t *testing.T) {
 }
 
 func TestAddressRows(t *testing.T) {
-	rows, err := db.AddressRowsMerged("Dsh6khiGjTuyExADXxjtDgz1gRr9C5dEUf6")
+	rows, err := db.AddressRowsMerged(context.Background(), "Dsh6khiGjTuyExADXxjtDgz1gRr9C5dEUf6")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestStuff(t *testing.T) {
 	testTxBlockTree := wire.TxTreeRegular
 
 	// Test number of spent outputs / spending transactions
-	spendingTxns, _, _, err := db.SpendingTransactions(testTx)
+	spendingTxns, _, _, err := db.SpendingTransactions(context.Background(), testTx)
 	if err != nil {
 		t.Error("SpendingTransactions", err)
 	}
@@ -115,7 +116,7 @@ func TestStuff(t *testing.T) {
 	}
 
 	// Test a certain spending transaction is as expected
-	spendingTx, _, _, err := db.SpendingTransaction(testTx, voutInd)
+	spendingTx, _, err := db.SpendingTransaction(context.Background(), testTx, voutInd)
 	if err != nil {
 		t.Error("SpendingTransaction", err)
 	}
@@ -127,7 +128,7 @@ func TestStuff(t *testing.T) {
 	}
 
 	// Block containing the transaction
-	blockHash, blockInd, txTree, err := db.TransactionBlock(testTx)
+	blockHash, blockInd, txTree, err := db.TransactionBlock(context.Background(), testTx)
 	if err != nil {
 		t.Fatal("TransactionBlock", err)
 	}
@@ -143,7 +144,7 @@ func TestStuff(t *testing.T) {
 	}
 
 	// List block transactions
-	blockTransactions, blockTreeOutInds, blockTxTrees, err := db.BlockTransactions(blockHash)
+	blockTransactions, blockTreeOutInds, blockTxTrees, err := db.BlockTransactions(context.Background(), blockHash)
 	if err != nil {
 		t.Error("BlockTransactions", err)
 	}
@@ -168,13 +169,13 @@ func TestStuff(t *testing.T) {
 			testTxBlockInd, blockTransactions[testTxBlockInd], testTx)
 	}
 
-	voutValue, err := db.VoutValue(testTx, voutInd)
+	voutValue, err := db.VoutValue(context.Background(), testTx, voutInd)
 	if err != nil {
 		t.Fatalf("VoutValue: %v", err)
 	}
 	t.Log(spew.Sdump(testTx, voutInd, voutValue))
 
-	voutValues, txInds, txTrees, err := db.VoutValues(testTx)
+	voutValues, txInds, txTrees, err := db.VoutValues(context.Background(), testTx)
 	if err != nil {
 		t.Fatalf("VoutValues: %v", err)
 	}

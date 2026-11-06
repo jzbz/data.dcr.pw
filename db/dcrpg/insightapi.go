@@ -11,6 +11,7 @@ import (
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v4"
+	"github.com/decred/dcrd/rpcclient/v8"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
 
@@ -74,34 +75,20 @@ func (pgb *ChainDB) InsightAddressTransactions(ctx context.Context, addr []strin
 		return nil, nil, err0
 	}
 
-	// Retrieve all merged address rows for these addresses.
-	var txns []chainhash.Hash // []txSortable
-	var numRecent int
+	// Retrieve all merged address rows for these addresses. The rows for each
+	// address are concatenated, so with multiple addresses the recent
+	// transactions are not necessarily at the front of txs. Select them by
+	// block time instead.
 	for i := range addr {
 		rows, err := pgb.AddressRowsMerged(ctx, addr[i])
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, r := range rows {
-			//txns = append(txns, txSortable{r.TxHash, r.TxBlockTime})
-			txns = append(txns, chainhash.Hash(r.TxHash))
-			// Count the number of "recent" txns.
+			txs = append(txs, chainhash.Hash(r.TxHash))
 			if r.TxBlockTime > recentBlocktime {
-				numRecent++
+				recentTxs = append(recentTxs, chainhash.Hash(r.TxHash))
 			}
-		}
-	}
-
-	// Sort by block time (DESC) then hash (ASC).
-	//sortTxsByTimeAndHash(txns)
-
-	txs = make([]chainhash.Hash, 0, len(txns))
-	recentTxs = make([]chainhash.Hash, 0, numRecent)
-
-	for i := range txns {
-		txs = append(txs, txns[i])
-		if i < numRecent {
-			recentTxs = append(recentTxs, txns[i])
 		}
 	}
 
@@ -162,6 +149,10 @@ func (pgb *ChainDB) GetTransactionsForBlockByHash(ctx context.Context, hash stri
 }
 
 func makeBlockTransactions(blockVerbose *chainjson.GetBlockVerboseResult) *apitypes.BlockTransactions {
+	if blockVerbose == nil {
+		return nil
+	}
+
 	blockTransactions := new(apitypes.BlockTransactions)
 
 	blockTransactions.Tx = make([]string, len(blockVerbose.Tx))
@@ -253,15 +244,33 @@ func (pgb *ChainDB) AddressUTXO(ctx context.Context, address string) ([]*dbtypes
 	if err != nil {
 		return nil, false, pgb.replaceCancelError(err)
 	}
-	// Get the pkscripts that db doesn't have.
-	for _, out := range txnOutputs {
-		txOutRes, err := pgb.Client.GetTxOut(ctx, (*chainhash.Hash)(&out.TxHash), out.Vout, 0, false)
-		if err != nil {
-			log.Warnf("could not get tx out (%v:%d): %w", out.TxHash, out.Vout, err)
-			continue
+	// Get the pkscripts that db doesn't have. The requests are pipelined in
+	// batches to avoid a full node round trip per output while bounding the
+	// number of requests outstanding at once.
+	const maxPendingTxOuts = 64
+	futures := make([]*rpcclient.FutureGetTxOutResult, 0, min(len(txnOutputs), maxPendingTxOuts))
+	for start := 0; start < len(txnOutputs); start += maxPendingTxOuts {
+		batch := txnOutputs[start:min(start+maxPendingTxOuts, len(txnOutputs))]
+		futures = futures[:0]
+		for _, out := range batch {
+			futures = append(futures, pgb.Client.GetTxOutAsync(ctx,
+				(*chainhash.Hash)(&out.TxHash), out.Vout, out.Tree, false))
 		}
+		for i, out := range batch {
+			txOutRes, err := futures[i].Receive()
+			if err != nil {
+				log.Warnf("could not get tx out (%v:%d): %v", out.TxHash, out.Vout, err)
+				continue
+			}
+			if txOutRes == nil {
+				// Spent or unknown to the node, e.g. spent in a block not
+				// yet processed by the DB.
+				log.Debugf("tx out (%v:%d) not found in the node's UTXO set", out.TxHash, out.Vout)
+				continue
+			}
 
-		out.PkScript, _ = hex.DecodeString(txOutRes.ScriptPubKey.Hex)
+			out.PkScript, _ = hex.DecodeString(txOutRes.ScriptPubKey.Hex)
+		}
 	}
 
 	// Update the address cache.

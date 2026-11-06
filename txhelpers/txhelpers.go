@@ -496,6 +496,12 @@ func TxPrevOutsByAddr(txAddrOuts MempoolAddressStore, txnsStore TxnsStore, msgTx
 		}
 
 		// prevOut.Index indicates which output.
+		if int(prevOut.Index) >= len(prevTx.TxOut) {
+			fmt.Printf("TxPrevOutsByAddr: previous outpoint %v:%d index is "+
+				"beyond the %d outputs of the transaction\n", hash,
+				prevOut.Index, len(prevTx.TxOut))
+			continue
+		}
 		txOut := prevTx.TxOut[prevOut.Index]
 
 		// Get the values.
@@ -609,6 +615,12 @@ func TxConsumesOutpointWithAddress(msgTx *wire.MsgTx, addr string, c VerboseTran
 		}
 
 		// prevOut.Index indicates which output.
+		if int(prevOut.Index) >= len(prevTx.TxOut) {
+			fmt.Printf("previous outpoint %v:%d index is beyond the %d "+
+				"outputs of the transaction\n", hash, prevOut.Index,
+				len(prevTx.TxOut))
+			continue
+		}
 		txOut := prevTx.TxOut[prevOut.Index]
 		// Extract the addresses from this output's PkScript.
 		_, txAddrs := stdscript.ExtractAddrs(txOut.Version, txOut.PkScript, params)

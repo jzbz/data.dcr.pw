@@ -372,3 +372,25 @@ func TestBytesString(t *testing.T) {
 		})
 	}
 }
+
+// TestTrimMempoolTxFeeRate pins the trimmed fee rate to atoms/kB, the unit of
+// TxBasic.FeeRate for confirmed transactions and of txhelpers.FeeRate.
+func TestTrimMempoolTxFeeRate(t *testing.T) {
+	tests := []struct {
+		name string
+		fees float64 // DCR
+		size int32   // bytes
+		want int64   // atoms/kB
+	}{
+		{"typical", 0.001, 1000, 100000},
+		{"fractional size", 0.0001, 253, 39525},
+		{"zero fee", 0, 300, 0},
+		{"zero size", 0.001, 0, 0},
+	}
+	for _, tt := range tests {
+		trimmed := TrimMempoolTx(&MempoolTx{Fees: tt.fees, Size: tt.size})
+		if got := int64(trimmed.FeeRate); got != tt.want {
+			t.Errorf("%s: FeeRate = %d atoms/kB, want %d", tt.name, got, tt.want)
+		}
+	}
+}

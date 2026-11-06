@@ -314,6 +314,7 @@ func (db *ProposalsDB) fetchProposalsData(tokens []string) ([]*pitypes.ProposalR
 func (db *ProposalsDB) fetchVettedTokensInventory() ([]string, error) {
 	page := uint32(1)
 	var vettedTokens []string
+	var prevFirstToken string
 	for {
 		inventoryReq := recordsv1.InventoryOrdered{
 			State: recordsv1.RecordStateVetted,
@@ -322,6 +323,15 @@ func (db *ProposalsDB) fetchVettedTokensInventory() ([]string, error) {
 		reply, err := db.client.RecordInventoryOrdered(inventoryReq)
 		if err != nil {
 			return nil, fmt.Errorf("pi client RecordInventoryOrdered err: %w", err)
+		}
+
+		// A server that ignores the page number would otherwise return the
+		// same full page forever.
+		if len(reply.Tokens) > 0 && reply.Tokens[0] == prevFirstToken {
+			return nil, fmt.Errorf("pi client RecordInventoryOrdered returned the same tokens for pages %d and %d", page-1, page)
+		}
+		if len(reply.Tokens) > 0 {
+			prevFirstToken = reply.Tokens[0]
 		}
 
 		vettedTokens = append(vettedTokens, reply.Tokens...)
@@ -612,6 +622,12 @@ func (db *ProposalsDB) proposalsInProgressUpdate() error {
 		if err != nil {
 			return fmt.Errorf("fetchProposalsData failed with err: %w", err)
 		}
+		if len(proposals) == 0 {
+			// fetchProposalsData skips a proposal with incomplete data from
+			// politeia, and has logged why.
+			log.Warnf("No data returned for in-progress proposal %v", prop.Token)
+			continue
+		}
 		proposal := proposals[0]
 
 		// Ticket vote results is an expensive API call, so we check
@@ -629,6 +645,9 @@ func (db *ProposalsDB) proposalsInProgressUpdate() error {
 			}
 			proposal.ChartData = voteResults
 			log.Infof("Retrieved vote results for proposal %v in %v.", prop.Token, time.Since(t0))
+		} else {
+			// No new votes, so keep the existing chart data.
+			proposal.ChartData = prop.ChartData
 		}
 
 		if prop.IsEqual(*proposal) {

@@ -13,6 +13,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// maxResponseBytes limits the size of an exchange's HTTP response body or
+// websocket message. It is far larger than any legitimate response, but stops
+// a misbehaving server from forcing an arbitrarily large allocation.
+const maxResponseBytes = 32 << 20 // 32 MiB
+
 // An interface wraps the websocket to enable testing.
 type websocketFeed interface {
 	// Done should return a channel that will be closed when there is a
@@ -94,6 +99,7 @@ func newSocketConnection(cfg *socketConfig) (websocketFeed, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.SetReadLimit(maxResponseBytes)
 	return &socketClient{
 		conn: conn,
 		done: make(chan struct{}),

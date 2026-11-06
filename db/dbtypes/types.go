@@ -1963,6 +1963,7 @@ type AddressTxnOutput struct {
 	TxHash   ChainHash
 	//BlockHash chainhash.Hash
 	Vout      uint32
+	Tree      int8
 	Height    int32
 	BlockTime int64
 	Atoms     int64

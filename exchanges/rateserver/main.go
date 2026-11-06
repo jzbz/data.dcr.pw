@@ -111,17 +111,6 @@ func main() {
 		log.Infof(msg)
 	}
 
-	sendUpdate := func(update *dcrrates.ExchangeRateUpdate) {
-		rateServer.clientLock.RLock()
-		for _, client := range rateServer.clients {
-			err := client.SendExchangeUpdate(update)
-			if err != nil {
-				log.Warnf("send error: %v", err)
-			}
-		}
-		rateServer.clientLock.RUnlock()
-	}
-
 	// Start the main loop in a goroutine, shutting down the grpcServer when done.
 	go func() {
 	out:
@@ -131,10 +120,16 @@ func main() {
 				break out
 			case update := <-xcSignals.Exchange:
 				printUpdate(update.Token, update.CurrencyPair)
-				sendUpdate(makeExchangeRateUpdate(update))
+				// The conversion copies every candlestick and depth point, so
+				// skip it when there is nobody to send it to. A client that
+				// subscribes after this check receives the current state,
+				// which already includes this update, when it connects.
+				if rateServer.hasClients() {
+					rateServer.sendUpdate(makeExchangeRateUpdate(update))
+				}
 			case update := <-xcSignals.Index:
 				printUpdate(update.Token, update.CurrencyPair)
-				sendUpdate(&dcrrates.ExchangeRateUpdate{
+				rateServer.sendUpdate(&dcrrates.ExchangeRateUpdate{
 					Token:        update.Token,
 					CurrencyPair: string(update.CurrencyPair),
 					Indices:      update.Indices,

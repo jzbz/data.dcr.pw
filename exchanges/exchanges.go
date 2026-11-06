@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"sort"
@@ -571,7 +572,7 @@ func (xc *CommonExchange) fetch(request *http.Request, response interface{}) (er
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("request failed: server returned %v", resp.StatusCode)
 	}
-	err = json.NewDecoder(resp.Body).Decode(response)
+	err = json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(response)
 	if err != nil {
 		return fmt.Errorf("Failed to decode json from %s: %v", request.URL.String(), err)
 	}
@@ -591,8 +592,8 @@ type WebsocketProcessor func([]byte)
 // Only the fields are protected for these. (websocketFeed).Write has
 // concurrency control.
 func (xc *CommonExchange) websocket() (websocketFeed, WebsocketProcessor) {
-	xc.mtx.RLock()
-	defer xc.mtx.RUnlock()
+	xc.wsMtx.RLock()
+	defer xc.wsMtx.RUnlock()
 	return xc.ws, xc.wsProcessor
 }
 

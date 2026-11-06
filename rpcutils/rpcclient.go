@@ -9,8 +9,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
@@ -86,6 +88,21 @@ var (
 	ErrAncestorMaxChainLength = errors.New("no ancestor: max chain length reached")
 )
 
+// isLoopbackHost reports whether the host part of a host[:port] address is
+// "localhost" or a loopback IP address. Names other than localhost are not
+// resolved.
+func isLoopbackHost(hostPort string) bool {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		host = strings.Trim(hostPort, "[]")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // ConnectNodeRPC attempts to create a new websocket connection to a dcrd node,
 // with the given credentials and optional notification handlers.
 func ConnectNodeRPC(host, user, pass, cert string, disableTLS, disableReconnect bool,
@@ -104,6 +121,11 @@ func ConnectNodeRPC(host, user, pass, cert string, disableTLS, disableReconnect 
 			"using certificate located in %s",
 			host, user, cert)
 	} else {
+		if !isLoopbackHost(host) {
+			log.Warnf("TLS is disabled for the dcrd RPC connection to %s, which "+
+				"is not a loopback address: the RPC credentials and all RPC "+
+				"traffic are sent in cleartext", host)
+		}
 		log.Debugf("Attempting to connect to dcrd RPC %s as user %s (no TLS)",
 			host, user)
 	}
@@ -327,6 +349,12 @@ func SideChainFull(client BlockFetcher, tipHash string) ([]string, error) {
 
 	hash := tipHash
 	for {
+		// Guard against a malformed chain of headers that never reaches the
+		// main chain.
+		if len(sideChain) >= maxAncestorChainLength {
+			return nil, ErrAncestorMaxChainLength
+		}
+
 		header := GetBlockHeaderVerboseByString(client, hash)
 		if header == nil {
 			return nil, fmt.Errorf("GetBlockHeaderVerboseByString failed for block %s", hash)

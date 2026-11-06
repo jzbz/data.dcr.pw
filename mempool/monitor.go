@@ -15,6 +15,7 @@ import (
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
 	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v4"
+	"github.com/decred/dcrd/wire"
 
 	exptypes "github.com/decred/dcrdata/v8/explorer/types"
 	pstypes "github.com/decred/dcrdata/v8/pubsub/types"
@@ -48,7 +49,7 @@ type MempoolMonitor struct {
 	mpoolInfo  MempoolInfo
 	inventory  *exptypes.MempoolInfo
 	addrMap    MempoolAddressStore
-	txnsStore  txhelpers.TxnsStore
+	txnsStore  txhelpers.TxnsStore // protected by addrMap.mtx
 	lastBlock  BlockID
 	params     *chaincfg.Params
 	collector  *DataCollector
@@ -157,6 +158,45 @@ func (p *MempoolMonitor) TxHandler(rawTx *chainjson.TxRawResult) error {
 		return nil // back to waiting for new tx signal
 	}
 
+	// If this is a vote, decode vote bits. This is done before any outpoints
+	// are recorded or signals sent so that undecodable votes and votes for a
+	// future block leave no trace in the address store.
+	var voteInfo *exptypes.VoteInfo
+	if txType == stake.TxTypeSSGen {
+		validation, version, bits, choices, tspendVotes, err := txhelpers.SSGenVoteChoices(msgTx, p.params)
+		if err != nil {
+			p.inventory.Unlock()
+			p.mtx.RUnlock()
+			return fmt.Errorf("cannot get vote choices for %s: %w", hash, err)
+		}
+
+		// Votes on the next block may be received just prior to dcrdata
+		// actually processing the new block. Do not broadcast these ahead of
+		// the full update with the new block signal as the vote will be
+		// included in that update.
+		if validation.Height > p.lastBlock.Height {
+			p.inventory.Unlock()
+			p.mtx.RUnlock()
+			log.Trace("Got a vote for a future block. Waiting to pull it "+
+				"out of mempool with new block signal. Vote: ", hash)
+			return nil
+		}
+
+		voteInfo = &exptypes.VoteInfo{
+			Validation: exptypes.BlockValidation{
+				Hash:     validation.Hash.String(),
+				Height:   validation.Height,
+				Validity: validation.Validity,
+			},
+			Version:     version,
+			Bits:        bits,
+			Choices:     choices,
+			TicketSpent: msgTx.TxIn[1].PreviousOutPoint.Hash.String(),
+			TSpends:     exptypes.ConvertTSpendVotes(tspendVotes),
+		}
+		voteInfo.ForLastBlock = voteInfo.VotesOnBlock(p.lastBlock.Hash.String())
+	}
+
 	// Set Outpoints in the addrMap.
 	p.addrMap.mtx.Lock()
 	if p.addrMap.store == nil {
@@ -186,6 +226,19 @@ func (p *MempoolMonitor) TxHandler(rawTx *chainjson.TxRawResult) error {
 			newInAddrs++
 		}
 	}
+
+	// Set the input values since they are generally not set in the msgTx for a
+	// mempool transaction. This must be done before msgTx is shared via
+	// txnsStore.
+	for i, txini := range msgTx.TxIn {
+		txini.ValueIn = valsIn[i]
+	}
+
+	// Store the current mempool transaction, block info zeroed.
+	p.txnsStore[*msgTx.CachedTxHash()] = &txhelpers.TxWithBlockData{
+		Tx:          msgTx,
+		MemPoolTime: rawTx.Time,
+	}
 	p.addrMap.mtx.Unlock()
 
 	// Send address signals.
@@ -197,12 +250,6 @@ func (p *MempoolMonitor) TxHandler(rawTx *chainjson.TxRawResult) error {
 		}, time.Second*10)
 	}
 
-	// Store the current mempool transaction, block info zeroed.
-	p.txnsStore[*msgTx.CachedTxHash()] = &txhelpers.TxWithBlockData{
-		Tx:          msgTx,
-		MemPoolTime: rawTx.Time,
-	}
-
 	log.Tracef("New transaction (%s: %s) added %d new and %d previous outpoints, "+
 		"%d out addrs (%d new), %d prev out addrs (%d new).",
 		txTypeStr, hash, newOuts, newPrevOuts,
@@ -211,34 +258,6 @@ func (p *MempoolMonitor) TxHandler(rawTx *chainjson.TxRawResult) error {
 	// Iterate the state id.
 	p.inventory.Ident++
 
-	// If this is a vote, decode vote bits.
-	var voteInfo *exptypes.VoteInfo
-	if txType == stake.TxTypeSSGen {
-		validation, version, bits, choices, tspendVotes, err := txhelpers.SSGenVoteChoices(msgTx, p.params)
-		if err != nil {
-			log.Debugf("Cannot get vote choices for %s", hash)
-		} else {
-			voteInfo = &exptypes.VoteInfo{
-				Validation: exptypes.BlockValidation{
-					Hash:     validation.Hash.String(),
-					Height:   validation.Height,
-					Validity: validation.Validity,
-				},
-				Version:     version,
-				Bits:        bits,
-				Choices:     choices,
-				TicketSpent: msgTx.TxIn[1].PreviousOutPoint.Hash.String(),
-				TSpends:     exptypes.ConvertTSpendVotes(tspendVotes),
-			}
-			voteInfo.ForLastBlock = voteInfo.VotesOnBlock(p.lastBlock.Hash.String())
-		}
-	}
-
-	// Set the input values since they are generally not set in the msgTx for a
-	// mempool transaction.
-	for i, txini := range msgTx.TxIn {
-		txini.ValueIn = valsIn[i]
-	}
 	fee, feeRate := txhelpers.TxFeeRate(msgTx)
 
 	tx := exptypes.MempoolTx{
@@ -279,18 +298,7 @@ func (p *MempoolMonitor) TxHandler(rawTx *chainjson.TxRawResult) error {
 		p.inventory.LikelyMineable.TicketTotal += tx.TotalOut
 
 	case stake.TxTypeSSGen:
-		// Votes on the next block may be received just prior to dcrdata
-		// actually processing the new block. Do not broadcast these
-		// ahead of the full update with the new block signal as the
-		// vote will be included in that update.
-		if tx.VoteInfo.Validation.Height > p.lastBlock.Height {
-			p.inventory.Unlock()
-			p.mtx.RUnlock()
-			log.Trace("Got a vote for a future block. Waiting to pull it "+
-				"out of mempool with new block signal. Vote: ", tx.Hash)
-			return nil
-		}
-
+		// Future votes and votes that could not be decoded returned above.
 		p.inventory.InvStake[tx.Hash] = struct{}{}
 		p.inventory.Votes = append([]exptypes.MempoolTx{tx}, p.inventory.Votes...)
 		//sort.Sort(byHeight(p.inventory.Votes))
@@ -407,12 +415,15 @@ func (p *MempoolMonitor) Refresh() (*StakeData, []exptypes.MempoolTx, *exptypes.
 		inventory.Ident = p.inventory.ID() + 1
 	}
 	p.inventory = inventory
-	p.txnsStore = txnsStore
-	p.mtx.Unlock()
 
+	// Swap the address store and transaction store together, before
+	// releasing mtx, so that TxHandler never pairs the new inventory with a
+	// stale address store.
 	p.addrMap.mtx.Lock()
 	p.addrMap.store = addrOuts
+	p.txnsStore = txnsStore
 	p.addrMap.mtx.Unlock()
+	p.mtx.Unlock()
 
 	// Insert new ticket counter into stakeData structure.
 	stakeData.NewTickets = uint32(newTickets)
@@ -450,6 +461,8 @@ func (p *MempoolMonitor) CollectAndStore() error {
 // and (3) all relevant transactions. See txhelpers.AddressOutpoints for more
 // information. The number of unconfirmed transactions is also returned. This
 // satisfies the rpcutils.MempoolAddressChecker interface for MempoolMonitor.
+// The returned AddressOutpoints is a snapshot owned by the caller; it does not
+// share its slices or map with the MempoolMonitor's address store.
 func (p *MempoolMonitor) UnconfirmedTxnsForAddress(address string) (*txhelpers.AddressOutpoints, int64, error) {
 	p.addrMap.mtx.Lock()
 	defer p.addrMap.mtx.Unlock()
@@ -464,60 +477,44 @@ func (p *MempoolMonitor) UnconfirmedTxnsForAddress(address string) (*txhelpers.A
 		return txhelpers.NewAddressOutpoints(address), 0, nil
 	}
 
-	if outs.TxnsStore == nil {
-		outs.TxnsStore = make(txhelpers.TxnsStore)
+	// Copy the outpoints so that later appends by TxHandler do not race with
+	// the caller. The pointed-to OutPoints are never modified.
+	snap := &txhelpers.AddressOutpoints{
+		Address:   outs.Address,
+		Outpoints: append([]*wire.OutPoint(nil), outs.Outpoints...),
+		PrevOuts:  append([]txhelpers.PrevOut(nil), outs.PrevOuts...),
+		TxnsStore: make(txhelpers.TxnsStore),
 	}
 
 	// Fill out the TxnsStore and count unconfirmed transactions. Note that the
 	// values stored in TxnsStore are pointers, and they are already allocated
 	// and stored in MempoolMonitor.txnsStore. This code makes a similar
 	// transaction map for just the transactions related to the address.
+	addTx := func(hash chainhash.Hash) {
+		if _, found := snap.TxnsStore[hash]; found {
+			// This is another (prev)out for an already seen transaction, so
+			// there is no need to retrieve it from MempoolMonitor.txnsStore.
+			return
+		}
+		txData := p.txnsStore[hash]
+		if txData == nil {
+			log.Warnf("Unable to locate in TxnsStore: %v", hash)
+			return
+		}
+		snap.TxnsStore[hash] = txData
+	}
 
 	// Process the transaction hashes for the new outpoints.
-	for op := range outs.Outpoints {
-		hash := outs.Outpoints[op].Hash
-		// New transaction for this address?
-		if _, found := outs.TxnsStore[hash]; found {
-			// This is another (prev)out for an already seen transaction, so
-			// there is no need to retrieve it from MempoolMonitor.txnsStore.
-			continue
-		}
-
-		txData := p.txnsStore[hash]
-		if txData == nil {
-			log.Warnf("Unable to locate in TxnsStore: %v", hash)
-			continue
-		}
-		outs.TxnsStore[hash] = txData
+	for _, op := range snap.Outpoints {
+		addTx(op.Hash)
 	}
 
-	// Process the transaction hashes for the consumed previous outpoints.
-	for ip := range outs.PrevOuts {
-		// Store the previous outpoint's spending transaction first.
-		spendingTx := outs.PrevOuts[ip].TxSpending
-		if _, found := outs.TxnsStore[spendingTx]; !found {
-			txData := p.txnsStore[spendingTx]
-			if txData == nil {
-				log.Warnf("Unable to locate in TxnsStore: %v", spendingTx)
-			}
-			outs.TxnsStore[spendingTx] = txData
-		}
-
-		// The funding transaction for the previous outpoint.
-		hash := outs.PrevOuts[ip].PreviousOutpoint.Hash
-		// New transaction for this address?
-		if _, found := outs.TxnsStore[hash]; found {
-			// This is another (prev)out for an already seen transaction, so
-			// there is no need to retrieve it from MempoolMonitor.txnsStore.
-			continue
-		}
-
-		txData := p.txnsStore[hash]
-		if txData == nil {
-			log.Warnf("Unable to locate in TxnsStore: %v", hash)
-		}
-		outs.TxnsStore[hash] = txData
+	// Process the transaction hashes for the consumed previous outpoints: the
+	// spending transaction and the funding transaction.
+	for i := range snap.PrevOuts {
+		addTx(snap.PrevOuts[i].TxSpending)
+		addTx(snap.PrevOuts[i].PreviousOutpoint.Hash)
 	}
 
-	return outs, int64(len(outs.TxnsStore)), nil
+	return snap, int64(len(snap.TxnsStore)), nil
 }

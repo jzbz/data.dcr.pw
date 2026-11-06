@@ -143,3 +143,61 @@ func TestAddressCacheItem_Transactions(t *testing.T) {
 		}
 	}
 }
+
+func TestAddressCache_purgeRowsToFit(t *testing.T) {
+	rows := func(n int) []*dbtypes.AddressRowCompact {
+		return make([]*dbtypes.AddressRowCompact, n)
+	}
+	newCache := func() *AddressCache {
+		return &AddressCache{
+			a: map[string]*AddressCacheItem{
+				"proj":     {rows: rows(6)},
+				"small":    {rows: rows(2)},
+				"balance1": {},
+				"balance2": {},
+			},
+			cap:            10,
+			capAddr:        10,
+			ProjectAddress: "proj",
+		}
+	}
+
+	// Room is made by purging items with rows, but not the project fund
+	// address or items without rows.
+	ac := newCache()
+	if !ac.purgeRowsToFit(4) {
+		t.Fatal("expected space for 4 rows")
+	}
+	if _, found := ac.a["small"]; found {
+		t.Error("expected the item with rows to be purged")
+	}
+	if numAddrs, numRows, _ := ac.length(); numAddrs != 3 || numRows != 6 {
+		t.Errorf("expected 3 addresses and 6 rows, got %d and %d", numAddrs, numRows)
+	}
+
+	// Nothing is purged when the rows already fit.
+	ac = newCache()
+	if !ac.purgeRowsToFit(2) || len(ac.a) != 4 {
+		t.Errorf("expected space for 2 rows with no purge, have %d addresses", len(ac.a))
+	}
+
+	// When only the project fund address holds rows, the purge must give up
+	// rather than spin.
+	ac = newCache()
+	done := make(chan bool)
+	go func() { done <- ac.purgeRowsToFit(5) }()
+	select {
+	case haveSpace := <-done:
+		if haveSpace {
+			t.Error("expected no space for 5 rows")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("purgeRowsToFit did not return")
+	}
+	if _, found := ac.a["proj"]; !found {
+		t.Error("the project fund address was purged")
+	}
+	if len(ac.a) != 3 {
+		t.Errorf("expected only the item with rows to be purged, have %d addresses", len(ac.a))
+	}
+}

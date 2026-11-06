@@ -6,7 +6,6 @@
 package insight
 
 import (
-	"fmt"
 	"net/http"
 
 	m "github.com/decred/dcrdata/cmd/dcrdata/internal/middleware"
@@ -28,21 +27,13 @@ func NewInsightAPIRouter(app *InsightApi, useRealIP, compression bool, maxAddrs 
 	// chi router
 	mux := chi.NewRouter()
 
-	// Create a rate limiter struct.
-	limiter := m.NewLimiter(app.ReqPerSecLimit)
-	limiter.SetMessage(fmt.Sprintf(
-		"You have reached the maximum request limit (%g req/s)", app.ReqPerSecLimit))
-
 	if useRealIP {
 		mux.Use(middleware.RealIP)
-		// RealIP sets RemoteAddr
-		limiter.SetIPLookups([]string{"RemoteAddr"})
-	} else {
-		limiter.SetIPLookups([]string{"X-Forwarded-For", "X-Real-IP", "RemoteAddr"})
 	}
 
-	// Put the limiter after RealIP
-	mux.Use(m.Tollbooth(limiter))
+	// Put the limiter after RealIP, which sets the RemoteAddr that the limiter
+	// uses to identify clients. A non-positive limit disables it.
+	mux.Use(m.RateLimiter(app.ReqPerSecLimit))
 
 	// Check for and validate the "indent" URL query. Each API request handler
 	// may now access the configured indentation string if indent was specified

@@ -61,12 +61,17 @@ func (c *PoolInfoCache) Get(hash chainhash.Hash) (*apitypes.TicketPoolInfo, bool
 func (c *PoolInfoCache) Set(hash chainhash.Hash, p *apitypes.TicketPoolInfo) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	c.poolInfo[hash] = p
-	if len(c.expireQueue)+1 >= c.maxSize {
+	if _, found := c.poolInfo[hash]; found {
+		// Already queued for expiration. Just update the value.
+		c.poolInfo[hash] = p
+		return
+	}
+	if len(c.expireQueue) >= c.maxSize {
 		expireHash := c.expireQueue[0]
 		c.expireQueue = c.expireQueue[1:]
 		delete(c.poolInfo, expireHash)
 	}
+	c.poolInfo[hash] = p
 	c.expireQueue = append(c.expireQueue, hash)
 }
 
@@ -81,7 +86,7 @@ func (c *PoolInfoCache) SetCapacity(size int) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	c.maxSize = size
-	for len(c.expireQueue) >= c.maxSize {
+	for len(c.expireQueue) > c.maxSize {
 		expireHash := c.expireQueue[0]
 		c.expireQueue = c.expireQueue[1:]
 		delete(c.poolInfo, expireHash)

@@ -692,9 +692,11 @@ func TrimMempoolTxs(txs []MempoolTx) []*TrimmedTxInfo {
 // TrimMempoolTx converts the input []MempoolTx to a []*TrimmedTxInfo.
 func TrimMempoolTx(tx *MempoolTx) (trimmedTx *TrimmedTxInfo) {
 	fee, _ := dcrutil.NewAmount(tx.Fees) // non-nil error returns 0 fee
+	// Fee rate in atoms/kB, the unit of TxBasic.FeeRate everywhere else (see
+	// txhelpers.FeeRate).
 	var feeRate dcrutil.Amount
 	if tx.Size > 0 {
-		feeRate = fee / dcrutil.Amount(int64(tx.Size))
+		feeRate = 1000 * fee / dcrutil.Amount(int64(tx.Size))
 	}
 	txBasic := &TxBasic{
 		TxID:          tx.TxID,

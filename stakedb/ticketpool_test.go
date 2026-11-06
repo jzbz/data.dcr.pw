@@ -2,12 +2,17 @@ package stakedb
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/slog"
+	"github.com/dgraph-io/badger"
+
+	apitypes "github.com/decred/dcrdata/v8/api/types"
 )
 
 func randomHash() chainhash.Hash {
@@ -440,4 +445,163 @@ func TestTicketPoolPersistent(t *testing.T) {
 	// Now the reference v1 folder (should not modify it).
 	t.Logf("Testing reference v1 DB at %v", dbFolderRefV1)
 	testDBDir(dbFolderRefV1)
+}
+
+// TestTicketPoolCorruptDiffLengths ensures that pool diffs whose length
+// prefixes do not match the stored value are rejected with an error rather
+// than causing a huge allocation or a panic.
+func TestTicketPoolCorruptDiffLengths(t *testing.T) {
+	hashes := func(n int) []byte { return make([]byte, n*chainhash.HashSize) }
+	u64 := func(v uint64) []byte {
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], v)
+		return b[:]
+	}
+	cat := func(parts ...[]byte) []byte {
+		var b []byte
+		for _, p := range parts {
+			b = append(b, p...)
+		}
+		return b
+	}
+
+	tests := []struct {
+		name  string
+		value []byte
+		valid bool
+	}{
+		{"valid", encodeDiff(&PoolDiff{In: randomHashSlice(2), Out: randomHashSlice(1)}), true},
+		{"empty", nil, false},
+		{"short", u64(0), false},
+		{"partial hash", cat(u64(0), hashes(1)[:5], u64(0)), false},
+		// inLen*HashSize wraps to 0, so the Out length would be read from the
+		// start of the In hash.
+		{"in length overflow", cat(u64(1<<59), hashes(1), u64(0)), false},
+		{"in length too large", cat(u64(2), hashes(1), u64(0)), false},
+		{"out length too large", cat(u64(1), hashes(1), u64(1<<40)), false},
+		{"out length too small", cat(u64(0), u64(0), hashes(1)), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p, err := NewTicketPool(dir, "tp")
+			if err != nil {
+				t.Fatalf("NewTicketPool failed: %v", err)
+			}
+			err = p.diffDB.Update(func(txn *badger.Txn) error {
+				return txn.Set(uint64Bytes(1), tt.value)
+			})
+			p.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			p, err = NewTicketPool(dir, "tp")
+			if tt.valid {
+				if err != nil {
+					t.Fatalf("NewTicketPool failed: %v", err)
+				}
+				defer p.Close()
+				if p.Tip() != 1 {
+					t.Errorf("expected tip 1, got %d", p.Tip())
+				}
+				return
+			}
+			if err == nil {
+				p.Close()
+				t.Fatal("NewTicketPool accepted a corrupt pool diff")
+			}
+			t.Log(err)
+		})
+	}
+}
+
+// TestTicketPoolAppendStoreFailure ensures that a failed DB write leaves the
+// in-memory diffs and tip unchanged.
+func TestTicketPoolAppendStoreFailure(t *testing.T) {
+	dir := t.TempDir()
+	p, err := NewTicketPool(dir, "tp")
+	if err != nil {
+		t.Fatalf("NewTicketPool failed: %v", err)
+	}
+	p.Close()
+
+	opts := badger.DefaultOptions(filepath.Join(dir, "tp"))
+	opts.Logger = &badgerLogger{log}
+	opts.ReadOnly = true
+	db, err := badger.Open(opts)
+	if err != nil {
+		t.Fatalf("badger.Open failed: %v", err)
+	}
+	defer db.Close()
+	p = &TicketPool{
+		pool:   make(map[chainhash.Hash]struct{}),
+		diffDB: db,
+	}
+
+	diff := &PoolDiff{In: randomHashSlice(2)}
+	if err = p.Append(diff, 1); err == nil {
+		t.Fatal("Append to a read-only DB did not fail")
+	}
+	if err = p.AppendAndAdvancePool(diff, 1); err == nil {
+		t.Fatal("AppendAndAdvancePool to a read-only DB did not fail")
+	}
+	if p.Tip() != 0 || len(p.diffs) != 0 || p.CurrentPoolSize() != 0 {
+		t.Errorf("in-memory state changed: tip %d, %d diffs, pool size %d",
+			p.Tip(), len(p.diffs), p.CurrentPoolSize())
+	}
+	if err = p.Append(diff, 2); err == nil {
+		t.Error("Append accepted a height that does not build on the tip")
+	}
+}
+
+func TestPoolInfoCacheCapacity(t *testing.T) {
+	c, err := NewPoolInfoCache(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1, h2, h3, h4 := randomHash(), randomHash(), randomHash(), randomHash()
+	c.Set(h1, &apitypes.TicketPoolInfo{Height: 1})
+	c.Set(h2, &apitypes.TicketPoolInfo{Height: 2})
+	if _, ok := c.Get(h1); !ok {
+		t.Fatal("h1 evicted before the cache reached capacity")
+	}
+	if _, ok := c.Get(h2); !ok {
+		t.Fatal("h2 not stored")
+	}
+
+	// Updating an existing entry must not evict anything.
+	c.Set(h2, &apitypes.TicketPoolInfo{Height: 20})
+	if _, ok := c.Get(h1); !ok {
+		t.Fatal("h1 evicted when updating h2")
+	}
+	if tpi, _ := c.Get(h2); tpi.Height != 20 {
+		t.Errorf("h2 not updated, height %d", tpi.Height)
+	}
+
+	c.Set(h3, &apitypes.TicketPoolInfo{Height: 3})
+	if _, ok := c.Get(h1); ok {
+		t.Error("h1 not evicted")
+	}
+	if len(c.poolInfo) != 2 || len(c.expireQueue) != 2 {
+		t.Errorf("expected 2 entries, got %d in map, %d queued", len(c.poolInfo), len(c.expireQueue))
+	}
+
+	if err = c.SetCapacity(3); err != nil {
+		t.Fatal(err)
+	}
+	c.Set(h4, &apitypes.TicketPoolInfo{Height: 4})
+	if len(c.poolInfo) != 3 {
+		t.Errorf("expected 3 entries, got %d", len(c.poolInfo))
+	}
+	if err = c.SetCapacity(2); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.poolInfo) != 2 || len(c.expireQueue) != 2 {
+		t.Errorf("expected 2 entries, got %d in map, %d queued", len(c.poolInfo), len(c.expireQueue))
+	}
+	if _, ok := c.Get(h2); ok {
+		t.Error("h2 not evicted by SetCapacity")
+	}
 }

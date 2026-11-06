@@ -100,9 +100,12 @@ func ExtractSwapDataFromInputScript(inputScript []byte, params *chaincfg.Params)
 			case txscript.OP_FALSE:
 				refund = true // tokenIndex == 2
 			default:
-				// Actually, OP_IF means (not False), so this should be alright, but odd...
-				fmt.Printf("opcode %d instead of OP_TRUE or OP_FALSE\n", b)
-				return nil, nil, nil, false, nil /// fmt.Errorf("invalid branch OPCODE %v", b)
+				// Any other opcode at this position means this is not the
+				// sigScript of an atomic swap redeem or refund, which is not
+				// an error. (OP_IF only tests for a non-false value, so other
+				// opcodes could satisfy the contract, but standard swap
+				// clients only push OP_TRUE or OP_FALSE.)
+				return nil, nil, nil, false, nil
 			}
 
 			tokenIndex++
@@ -178,20 +181,13 @@ func ParseAtomicSwapContract(scriptVersion uint16, script []byte, params *chainc
 		return nil, fmt.Errorf("error parsing swap refund address: %v", err)
 	}
 
-	var formattedLockTime string
-	if contractDataPushes.LockTime >= int64(txscript.LockTimeThreshold) {
-		formattedLockTime = time.Unix(contractDataPushes.LockTime, 0).UTC().Format(timeFmt)
-	} else {
-		formattedLockTime = fmt.Sprintf("block %v", contractDataPushes.LockTime)
-	}
-
 	return &AtomicSwapContractPushes{
 		ContractAddress:   contractP2SH,
 		RecipientAddress:  recipientAddr,
 		RefundAddress:     refundAddr,
 		Locktime:          contractDataPushes.LockTime,
 		SecretHash:        contractDataPushes.SecretHash,
-		FormattedLocktime: formattedLockTime,
+		FormattedLocktime: formatLockTime(contractDataPushes.LockTime),
 	}, nil
 }
 
@@ -337,6 +333,15 @@ type AtomicSwapData struct {
 	IsRefund         bool
 }
 
+// formatLockTime formats a contract lock time, which is a block height if it
+// is below txscript.LockTimeThreshold, and a Unix timestamp otherwise.
+func formatLockTime(lockTime int64) string {
+	if lockTime >= int64(txscript.LockTimeThreshold) {
+		return time.Unix(lockTime, 0).UTC().Format(timeFmt)
+	}
+	return fmt.Sprintf("block %v", lockTime)
+}
+
 func (asd *AtomicSwapData) ToAPI() *AtomicSwap {
 	return &AtomicSwap{
 		ContractTxRef:     fmt.Sprintf("%s:%d", asd.ContractTx, asd.ContractVout),
@@ -348,7 +353,7 @@ func (asd *AtomicSwapData) ToAPI() *AtomicSwap {
 		Locktime:          asd.Locktime,
 		SecretHash:        hex.EncodeToString(asd.SecretHash[:]),
 		Secret:            hex.EncodeToString(asd.Secret),
-		FormattedLocktime: time.Unix(asd.Locktime, 0).UTC().Format(timeFmt),
+		FormattedLocktime: formatLockTime(asd.Locktime),
 		SpendTxInput:      fmt.Sprintf("%s:%d", asd.SpendTx, asd.SpendVin),
 		IsRefund:          asd.IsRefund,
 	}

@@ -23,10 +23,16 @@ type fileMux struct {
 }
 
 // NewAPIRouter creates a new HTTP request path router/mux for the given API,
-// appContext.
-func NewAPIRouter(app *appContext, JSONIndent string, useRealIP, compressLarge bool) apiMux {
+// appContext. Each client is limited to reqPerSecLimit requests per second, or
+// is not limited if reqPerSecLimit is not positive.
+func NewAPIRouter(app *appContext, JSONIndent string, useRealIP, compressLarge bool,
+	reqPerSecLimit float64) apiMux {
 	// chi router
 	mux := stackedMux(useRealIP)
+
+	// The limiter goes after RealIP, installed by stackedMux, which sets the
+	// RemoteAddr that the limiter uses to identify clients.
+	mux.Use(m.RateLimiter(reqPerSecLimit))
 
 	// Check for and validate the "indent" URL query. Each API request handler
 	// may now access the configured indentation string if indent was specified

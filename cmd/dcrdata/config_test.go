@@ -304,3 +304,16 @@ func TestNormalizeNetworkAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultRateLimits(t *testing.T) {
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("Failed to load dcrdata config: %v", err)
+	}
+	if cfg.APIReqRateLimit != defaultAPIReqRateLimit {
+		t.Errorf("api-limit-rps = %v, want %v", cfg.APIReqRateLimit, defaultAPIReqRateLimit)
+	}
+	if cfg.InsightReqRateLimit != defaultInsightReqRateLimit {
+		t.Errorf("insight-limit-rps = %v, want %v", cfg.InsightReqRateLimit, defaultInsightReqRateLimit)
+	}
+}

@@ -6,9 +6,15 @@ package pubsub
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	exptypes "github.com/decred/dcrdata/v8/explorer/types"
 	pstypes "github.com/decred/dcrdata/v8/pubsub/types"
+	"golang.org/x/net/websocket"
 )
 
 func Test_client_subscribe(t *testing.T) {
@@ -47,4 +53,79 @@ func Test_client_subscribe(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAddTxToBuffer(t *testing.T) {
+	wsh := NewWebsocketHub()
+	newTxsMsg := pstypes.HubMessage{Signal: sigNewTxs}
+
+	// One subscribed client nearly ready to send, one subscribed client with
+	// an empty buffer, and one client that is not subscribed to new txs.
+	nearlyFull, empty, notSubd := newClient(), newClient(), newClient()
+	for _, cl := range []*client{nearlyFull, empty} {
+		if _, err := cl.subscribe(newTxsMsg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < NewTxBufferSize-1; i++ {
+		nearlyFull.newTxs.addTxToBuffer(&exptypes.MempoolTx{})
+	}
+	for _, cl := range []*client{nearlyFull, empty, notSubd} {
+		spoke := make(hubSpoke)
+		wsh.clients[&spoke] = cl
+	}
+
+	// The result must not depend on map iteration order.
+	if !wsh.addTxToBuffer(&exptypes.MempoolTx{}) {
+		t.Errorf("addTxToBuffer did not report a full buffer")
+	}
+	if n := len(nearlyFull.newTxs.t); n != NewTxBufferSize {
+		t.Errorf("subscribed client buffer length %d, want %d", n, NewTxBufferSize)
+	}
+	if n := len(empty.newTxs.t); n != 1 {
+		t.Errorf("subscribed client buffer length %d, want 1", n)
+	}
+	if n := len(notSubd.newTxs.t); n != 0 {
+		t.Errorf("unsubscribed client buffer length %d, want 0", n)
+	}
+
+	// Unsubscribing discards the buffered transactions.
+	if err := nearlyFull.unsubscribe(newTxsMsg); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(nearlyFull.newTxs.t); n != 0 {
+		t.Errorf("buffer length after unsubscribe %d, want 0", n)
+	}
+}
+
+func TestClientDisconnectUnregisters(t *testing.T) {
+	psh := &PubSubHub{wsHub: NewWebsocketHub()}
+	go psh.wsHub.Run()
+	defer psh.wsHub.Stop()
+
+	srv := httptest.NewServer(http.HandlerFunc(psh.WebSocketHandler))
+	defer srv.Close()
+
+	waitNumClients := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for psh.wsHub.NumClients() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("NumClients = %d, want %d", psh.wsHub.NumClients(), want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, err := websocket.Dial(url, "", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitNumClients(1)
+
+	// Closing the connection must unregister the client without waiting for
+	// the next hub signal (the ping interval is much longer than the wait).
+	ws.Close()
+	waitNumClients(0)
 }

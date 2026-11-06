@@ -4,12 +4,14 @@
 package internal
 
 const (
-	// UnmatchedSpending lists addresses with no matching_tx_hash set but with
-	// is_funding=FALSE. Spending address rows should always have a matching
-	// transaction hash.
+	// UnmatchedSpending lists addresses with no matching_tx_hash set (NULL,
+	// empty, or the zero hash) but with is_funding=FALSE. Spending address rows
+	// should always have a matching transaction hash.
 	UnmatchedSpending = `SELECT id, address
 		FROM addresses
-		WHERE char_length(matching_tx_hash)=0
+		WHERE (matching_tx_hash IS NULL
+				OR octet_length(matching_tx_hash)=0
+				OR matching_tx_hash=decode(repeat('00', 32), 'hex'))
 			AND NOT is_funding;`
 
 	// ExtraMainchainBlocks lists mainchain blocks at heights where there are

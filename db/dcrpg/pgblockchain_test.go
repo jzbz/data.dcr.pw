@@ -4,17 +4,13 @@ package dcrpg
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/dcrutil/v4"
 
-	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v4"
 	"github.com/decred/dcrdata/v8/db/cache"
 	"github.com/decred/dcrdata/v8/db/dbtypes"
 	"github.com/decred/dcrdata/v8/txhelpers"
@@ -70,7 +66,7 @@ func TestInsertSwap(t *testing.T) {
 func TestChainDB_AddressTransactionsAll(t *testing.T) {
 	// address with no transactions.
 	address := "DsUBCQWJsW8raht1i4gXTv7xPu3ySpUxxxx"
-	rows, err := db.AddressTransactionsAll(address)
+	rows, err := db.AddressTransactionsAll(context.Background(), address)
 	if err != nil {
 		t.Errorf("err should have been nil, was: %v", err)
 	}
@@ -78,7 +74,7 @@ func TestChainDB_AddressTransactionsAll(t *testing.T) {
 		t.Fatalf("should have been no rows, got %v", rows)
 	}
 
-	height, hash, _ := db.HeightHashDBLegacy()
+	height, hash, _ := db.HeightHashDBLegacy(context.Background())
 	h, _ := chainhash.NewHashFromStr(hash)
 	blockID := cache.NewBlockID(h, int64(height))
 	wasStored := db.AddressCache.StoreRows(address, rows, blockID)
@@ -98,7 +94,7 @@ func TestChainDB_AddressTransactionsAll(t *testing.T) {
 func TestMergeRows(t *testing.T) {
 	address := "Dcur2mcGjmENx4DhNqDctW5wJCVyT3Qeqkx"
 
-	rows, err := db.AddressTransactionsAll(address)
+	rows, err := db.AddressTransactionsAll(context.Background(), address)
 	if err != nil {
 		t.Errorf("err should have been nil, was: %v", err)
 	}
@@ -115,7 +111,7 @@ func TestMergeRows(t *testing.T) {
 	t.Logf("%d rows combined to %d merged rows in %v", len(rows),
 		len(mergedRows), time.Since(tStart))
 
-	mergedRows0, err := db.AddressTransactionsAllMerged(address)
+	mergedRows0, err := db.AddressTransactionsAllMerged(context.Background(), address)
 	if err != nil {
 		t.Errorf("err should have been nil, was: %v", err)
 	}
@@ -280,121 +276,5 @@ func TestRetrieveTxsByBlockHash(t *testing.T) {
 			t.Errorf("Incorrect block time: got %d, expected %d",
 				tT.Unix(), trefUNIX)
 		}
-	}
-}
-
-func TestUpdateChainState(t *testing.T) {
-	// rawData is a sample payload format as returned by getBlockChainInfo rpc endpoint.
-	var rawData = []byte(`{
-		"chain": "mainnet",
-		"blocks": 316016,
-		"headers": 316016,
-		"syncheight": 316016,
-		"bestblockhash": "00000000000000001d8cfa54dc13cfb0563421fd017801401cb2bdebe3579355",
-		"difficulty": 406452686,
-		"verificationprogress": 1,
-		"chainwork": "0000000000000000000000000000000000000000000209c779c196914f038522",
-		"initialblockdownload": false,
-		"maxblocksize": 393216,
-		"deployments": {
-			"fixlnseqlocks": {
-				"status": "defined",
-				"starttime": 1548633600,
-				"expiretime": 1580169600
-			},
-			"lnfeatures": {
-				"status": "active",
-				"since": 189568,
-				"starttime": 1505260800,
-				"expiretime": 1536796800
-			},
-			"sampleagenda1": {
-				"status": "lockedin",
-				"since": 119248,
-				"starttime": 1493164800,
-				"expiretime": 1508976000
-			},
-			"sampleagenda2": {
-				"status": "failed",
-				"since": 149248,
-				"starttime": 1493164800,
-				"expiretime": 1524700800
-			},
-			"sampleagenda3": {
-				"status": "started",
-				"since": 149248,
-				"starttime": 1493164800,
-				"expiretime": 1524700800
-			}
-		}
-	}`)
-
-	var chainInfoData = new(chainjson.GetBlockChainInfoResult)
-	err := json.Unmarshal(rawData, chainInfoData)
-	if err != nil {
-		t.Fatalf("expected no error to be returned but found: %v", err)
-	}
-
-	bbh, _ := chainHashFromStr("00000000000000001d8cfa54dc13cfb0563421fd017801401cb2bdebe3579355")
-
-	// Expected payload
-	var expectedPayload = dbtypes.BlockChainData{
-		Chain:                  "mainnet",
-		SyncHeight:             316016,
-		BestHeight:             316016,
-		BestBlockHash:          bbh,
-		Difficulty:             406452686,
-		VerificationProgress:   1.0,
-		ChainWork:              "0000000000000000000000000000000000000000000209c779c196914f038522",
-		IsInitialBlockDownload: false,
-		MaxBlockSize:           393216,
-		AgendaMileStones: map[string]dbtypes.MileStone{
-			"fixlnseqlocks": {
-				Status:     dbtypes.InitialAgendaStatus,
-				StartTime:  time.Unix(1548633600, 0),
-				ExpireTime: time.Unix(1580169600, 0),
-			},
-			"lnfeatures": {
-				Status:     dbtypes.ActivatedAgendaStatus,
-				VotingDone: 181504,
-				Activated:  189568,
-				StartTime:  time.Unix(1505260800, 0),
-				ExpireTime: time.Unix(1536796800, 0),
-			},
-			"sampleagenda1": {
-				Status:     dbtypes.LockedInAgendaStatus,
-				VotingDone: 119248,
-				Activated:  127312,
-				StartTime:  time.Unix(1493164800, 0),
-				ExpireTime: time.Unix(1508976000, 0),
-			},
-			"sampleagenda2": {
-				Status:     dbtypes.FailedAgendaStatus,
-				VotingDone: 149248,
-				StartTime:  time.Unix(1493164800, 0),
-				ExpireTime: time.Unix(1524700800, 0),
-			},
-			"sampleagenda3": {
-				Status:     dbtypes.StartedAgendaStatus,
-				StartTime:  time.Unix(1493164800, 0),
-				ExpireTime: time.Unix(1524700800, 0),
-			},
-		},
-	}
-
-	dbRPC := &ChainDB{
-		chainParams: &chaincfg.Params{
-			RuleChangeActivationInterval: 8064,
-		},
-		deployments: new(ChainDeployments),
-	}
-
-	// This sets the dbRPC.chainInfo value.
-	dbRPC.UpdateChainState(chainInfoData)
-
-	// Checks if the set dbRPC.chainInfo has a similar format and content as the
-	// expected payload including the internal UnmarshalJSON implementation.
-	if reflect.DeepEqual(dbRPC.deployments.chainInfo, expectedPayload) {
-		t.Fatalf("expected both payloads to match but the did not")
 	}
 }

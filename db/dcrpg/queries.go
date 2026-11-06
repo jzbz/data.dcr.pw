@@ -663,11 +663,6 @@ func insertVotes(db *sql.DB, dbTxns []*dbtypes.Tx, _ /*txDbIDs*/ []uint64, fTx *
 				storedAgendas[val.ID] = s
 			}
 
-			if p.ID == 0 {
-				p.ID = s.ID
-				votesMilestones.AgendaMileStones[val.ID] = p
-			}
-
 			var index, err = dbtypes.ChoiceIndexFromStr(val.Choice.Id)
 			if err != nil {
 				bail()
@@ -1449,31 +1444,18 @@ func retrieveAddressBalance(ctx context.Context, db *sql.DB, address string) (ba
 	// Never return nil *AddressBalance.
 	balance = &dbtypes.AddressBalance{Address: address}
 
-	// The sql.Tx does not have a timeout, as the individual queries will.
-	var dbtx *sql.Tx
-	dbtx, err = db.BeginTx(context.Background(), &sql.TxOptions{
-		Isolation: sql.LevelDefault,
-		ReadOnly:  true,
-	})
-	if err != nil {
-		err = fmt.Errorf("unable to begin database transaction: %w", err)
-		return
-	}
-
 	// Query for spent and unspent totals.
 	var rows *sql.Rows
 	rows, err = db.QueryContext(ctx, internal.SelectAddressSpentUnspentCountAndValue, address)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			_ = dbtx.Commit()
+			err = nil
 			return
-		}
-		if errRoll := dbtx.Rollback(); errRoll != nil {
-			log.Errorf("Rollback failed: %v", errRoll)
 		}
 		err = fmt.Errorf("failed to query spent and unspent amounts: %w", err)
 		return
 	}
+	defer closeRows(rows)
 
 	var fromStake, toStake int64
 	for rows.Next() {
@@ -1516,9 +1498,7 @@ func retrieveAddressBalance(ctx context.Context, db *sql.DB, address string) (ba
 	if balance.TotalSpent > 0 {
 		balance.ToStake = float64(toStake) / float64(balance.TotalSpent)
 	}
-	closeRows(rows)
 
-	err = dbtx.Commit()
 	return
 }
 
@@ -1536,23 +1516,9 @@ func countMergedTxns(ctx context.Context, db *sql.DB, address string) (count int
 
 func countMerged(ctx context.Context, db *sql.DB, address, query string) (count int64, err error) {
 	// Query for merged transaction count.
-	var dbtx *sql.Tx
-	dbtx, err = db.BeginTx(context.Background(), &sql.TxOptions{
-		Isolation: sql.LevelDefault,
-		ReadOnly:  true,
-	})
-	if err != nil {
-		err = fmt.Errorf("unable to begin database transaction: %w", err)
-		return
-	}
-
 	var sqlCount sql.NullInt64
-	err = dbtx.QueryRowContext(ctx, query, address).
-		Scan(&sqlCount)
+	err = db.QueryRowContext(ctx, query, address).Scan(&sqlCount)
 	if err != nil && err != sql.ErrNoRows {
-		if errRoll := dbtx.Rollback(); errRoll != nil {
-			log.Errorf("Rollback failed: %v", errRoll)
-		}
 		err = fmt.Errorf("failed to query merged spent count: %w", err)
 		return
 	}
@@ -1562,8 +1528,7 @@ func countMerged(ctx context.Context, db *sql.DB, address, query string) (count 
 		log.Debug("Merged debit spent count is not valid")
 	}
 
-	err = dbtx.Commit()
-	return
+	return count, nil
 }
 
 // retrieveAddressUTXOs gets the unspent transaction outputs (UTXOs) paying to
@@ -1634,7 +1599,7 @@ func retrieveAddressDbUTXOs(ctx context.Context, db *sql.DB, address string) ([]
 		txnOutput := new(dbtypes.AddressTxnOutput)
 		if err = rows.Scan(&txnOutput.Address, &txnOutput.TxHash,
 			&txnOutput.Atoms, &txnOutput.Height, &blockTime,
-			&txnOutput.Vout); err != nil {
+			&txnOutput.Vout, &txnOutput.Tree); err != nil {
 			log.Error(err)
 			return nil, err
 		}
@@ -4280,6 +4245,15 @@ func updateBlockNextByNextHash(db SqlExecutor, currentNext, newNext dbtypes.Chai
 	return nil
 }
 
+// poolValAvg returns the average ticket value for a pool of size tickets with
+// total value poolValue, or zero for an empty pool.
+func poolValAvg(poolValue float64, size uint32) float64 {
+	if size == 0 {
+		return 0
+	}
+	return poolValue / float64(size)
+}
+
 // retrievePoolInfo returns ticket pool info for block height ind
 func retrievePoolInfo(ctx context.Context, db *sql.DB, ind int64) (*apitypes.TicketPoolInfo, error) {
 	tpi := &apitypes.TicketPoolInfo{
@@ -4291,7 +4265,7 @@ func retrievePoolInfo(ctx context.Context, db *sql.DB, ind int64) (*apitypes.Tic
 	err := db.QueryRowContext(ctx, internal.SelectPoolInfoByHeight, ind).Scan(&hash, &tpi.Size,
 		&val, &winners)
 	tpi.Value = toCoin(val)
-	tpi.ValAvg = tpi.Value / float64(tpi.Size)
+	tpi.ValAvg = poolValAvg(tpi.Value, tpi.Size)
 	tpi.Winners = make([]string, len(winners))
 	for i := range winners {
 		tpi.Winners[i] = winners[i].String()
@@ -4320,7 +4294,7 @@ func retrievePoolInfoRange(ctx context.Context, db *sql.DB, ind0, ind1 int64) ([
 	}
 	defer stmt.Close()
 
-	rows, err := stmt.Query(ind0, ind1)
+	rows, err := stmt.QueryContext(ctx, ind0, ind1)
 	if err != nil {
 		log.Errorf("Query failed: %v", err)
 		return nil, nil, err
@@ -4337,7 +4311,7 @@ func retrievePoolInfoRange(ctx context.Context, db *sql.DB, ind0, ind1 int64) ([
 			return nil, nil, err
 		}
 		tpi.Value = toCoin(val)
-		tpi.ValAvg = tpi.Value / float64(tpi.Size)
+		tpi.ValAvg = poolValAvg(tpi.Value, tpi.Size)
 
 		tpi.Winners = make([]string, len(winners))
 		for i := range winners {
@@ -4368,7 +4342,7 @@ func retrievePoolValAndSizeRange(ctx context.Context, db *sql.DB, ind0, ind1 int
 	poolvals := make([]float64, 0, N)
 	poolsizes := make([]uint32, 0, N)
 
-	stmt, err := db.Prepare(internal.SelectPoolValSizeRange)
+	stmt, err := db.PrepareContext(ctx, internal.SelectPoolValSizeRange)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -4419,7 +4393,7 @@ func retrieveBlockSummary(ctx context.Context, db *sql.DB, ind int64) (*apitypes
 	}
 	bd.Hash = hash.String()
 	bd.PoolInfo.Value = toCoin(val)
-	bd.PoolInfo.ValAvg = bd.PoolInfo.Value / float64(bd.Size)
+	bd.PoolInfo.ValAvg = poolValAvg(bd.PoolInfo.Value, bd.PoolInfo.Size)
 	bd.Time = apitypes.TimeAPI{S: timestamp}
 	bd.PoolInfo.Winners = make([]string, len(winners))
 	for i := range winners {
@@ -4447,7 +4421,7 @@ func retrieveBlockSummaryByHash(ctx context.Context, db *sql.DB, hash dbtypes.Ch
 	bd.Hash = hash.String()
 	bd.PoolInfo.Value = toCoin(val.Int64)
 	bd.PoolInfo.Size = uint32(psize.Int64)
-	bd.PoolInfo.ValAvg = bd.PoolInfo.Value / float64(bd.Size)
+	bd.PoolInfo.ValAvg = poolValAvg(bd.PoolInfo.Value, bd.PoolInfo.Size)
 	bd.Time = apitypes.TimeAPI{S: timestamp}
 	bd.PoolInfo.Winners = make([]string, len(winners))
 	for i := range winners {
@@ -4496,7 +4470,7 @@ func retrieveBlockSummaryRange(ctx context.Context, db *sql.DB, ind0, ind1 int64
 		}
 		bd.Hash = hash.String()
 		bd.PoolInfo.Value = toCoin(val)
-		bd.PoolInfo.ValAvg = bd.PoolInfo.Value / float64(bd.Size)
+		bd.PoolInfo.ValAvg = poolValAvg(bd.PoolInfo.Value, bd.PoolInfo.Size)
 		bd.Time = apitypes.TimeAPI{S: timestamp}
 		bd.PoolInfo.Winners = make([]string, len(winners))
 		for i := range winners {
@@ -4554,7 +4528,7 @@ func retrieveBlockSummaryRangeStepped(ctx context.Context, db *sql.DB, ind0, ind
 		}
 		bd.Hash = hash.String()
 		bd.PoolInfo.Value = toCoin(val)
-		bd.PoolInfo.ValAvg = bd.PoolInfo.Value / float64(bd.Size)
+		bd.PoolInfo.ValAvg = poolValAvg(bd.PoolInfo.Value, bd.PoolInfo.Size)
 		bd.Time = apitypes.TimeAPI{S: timestamp}
 		bd.PoolInfo.Winners = make([]string, len(winners))
 		for i := range winners {
@@ -4697,11 +4671,11 @@ func retrieveLatestBlockSummary(ctx context.Context, db *sql.DB) (*apitypes.Bloc
 	}
 	bd.Hash = hash.String()
 	bd.PoolInfo.Value = toCoin(val)
-	bd.PoolInfo.ValAvg = bd.PoolInfo.Value / float64(bd.PoolInfo.Size)
+	bd.PoolInfo.ValAvg = poolValAvg(bd.PoolInfo.Value, bd.PoolInfo.Size)
 	bd.Time = apitypes.TimeAPI{S: timestamp}
 	bd.PoolInfo.Winners = make([]string, len(winners))
 	for i := range winners {
-		bd.PoolInfo.Winners = append(bd.PoolInfo.Winners, winners[i].String())
+		bd.PoolInfo.Winners[i] = winners[i].String()
 	}
 	bd.StakeDiff = toCoin(sbits)
 	return bd, nil

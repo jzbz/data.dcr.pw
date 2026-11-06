@@ -4,9 +4,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/decred/dcrdata/exchanges/v3"
 	dcrrates "github.com/decred/dcrdata/exchanges/v3/ratesproto"
@@ -53,6 +55,121 @@ func (c *clientStub) SendExchangeUpdate(update *dcrrates.ExchangeRateUpdate) err
 
 func (c *clientStub) Stream() GRPCStream {
 	return nil
+}
+
+// streamStub is a GRPCStream whose Send blocks until unblock is closed.
+type streamStub struct {
+	ctx     context.Context
+	sent    chan *dcrrates.ExchangeRateUpdate
+	unblock chan struct{}
+}
+
+func (s *streamStub) Send(update *dcrrates.ExchangeRateUpdate) error {
+	<-s.unblock
+	s.sent <- update
+	return nil
+}
+
+func (s *streamStub) Context() context.Context {
+	return s.ctx
+}
+
+func newTestServer(t *testing.T) *RateServer {
+	t.Helper()
+	xcBot, err := exchanges.NewExchangeBot(&exchanges.ExchangeBotConfig{Index: "USD"})
+	if err != nil {
+		t.Fatalf("NewExchangeBot error: %v", err)
+	}
+	return NewRateServer("USD", xcBot)
+}
+
+func subscribe(server *RateServer, stream GRPCStream) chan error {
+	errC := make(chan error, 1)
+	go func() {
+		errC <- server.ReallySubscribeExchanges(&dcrrates.ExchangeSubscription{
+			Index:     "USD",
+			Exchanges: []string{"tokenA"},
+		}, stream)
+	}()
+	return errC
+}
+
+func waitForClients(t *testing.T, server *RateServer, n int) {
+	t.Helper()
+	for tStart := time.Now(); time.Since(tStart) < 5*time.Second; time.Sleep(time.Millisecond) {
+		server.clientLock.RLock()
+		count := len(server.clients)
+		server.clientLock.RUnlock()
+		if count == n {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %d clients", n)
+}
+
+// TestSubscriberDelivery checks that queued updates are delivered, and that the
+// client is removed from the map when its stream ends.
+func TestSubscriberDelivery(t *testing.T) {
+	server := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := &streamStub{
+		ctx:     ctx,
+		sent:    make(chan *dcrrates.ExchangeRateUpdate, 1),
+		unblock: make(chan struct{}),
+	}
+	close(stream.unblock)
+	errC := subscribe(server, stream)
+	waitForClients(t, server, 1)
+
+	server.sendUpdate(&dcrrates.ExchangeRateUpdate{Token: "tokenB"}) // not subscribed
+	server.sendUpdate(&dcrrates.ExchangeRateUpdate{Token: "tokenA", Price: 1})
+	select {
+	case update := <-stream.sent:
+		if update.Token != "tokenA" || update.Price != 1 {
+			t.Fatalf("wrong update received: %v", update)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("update not delivered")
+	}
+
+	cancel()
+	if err := <-errC; err != nil {
+		t.Fatalf("unexpected error after stream cancellation: %v", err)
+	}
+	waitForClients(t, server, 0)
+}
+
+// TestSlowSubscriber checks that a client that stops reading neither blocks
+// sendUpdate nor remains in the client map.
+func TestSlowSubscriber(t *testing.T) {
+	server := newTestServer(t)
+	stream := &streamStub{
+		ctx:     context.Background(),
+		sent:    make(chan *dcrrates.ExchangeRateUpdate, clientQueueSize+2),
+		unblock: make(chan struct{}),
+	}
+	errC := subscribe(server, stream)
+	waitForClients(t, server, 1)
+
+	sent := make(chan struct{})
+	go func() {
+		for i := 0; i < clientQueueSize+2; i++ {
+			server.sendUpdate(&dcrrates.ExchangeRateUpdate{Token: "tokenA"})
+		}
+		close(sent)
+	}()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("sendUpdate blocked on a client that is not reading")
+	}
+
+	// Once the blocked Send returns, the client is disconnected and removed.
+	close(stream.unblock)
+	if err := <-errC; err == nil {
+		t.Fatalf("expected an error for a client that fell behind")
+	}
+	waitForClients(t, server, 0)
 }
 
 func TestSendStateList(t *testing.T) {

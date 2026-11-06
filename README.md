@@ -555,7 +555,8 @@ and will change each time the tickets are requested.
 <sup>\*</sup>For the pool info block range endpoint that accepts the `arrays`
 url query, a value of `true` will put all pool values and pool sizes into
 separate arrays, rather than having a single array of pool info JSON objects.
-This may make parsing more efficient for the client.
+This may make parsing more efficient for the client. Without `arrays=true`, the
+range may span at most 1000 blocks.
 
 | Votes and Agendas Info            | Path                  | Type                        |
 | --------------------------------- | --------------------- | --------------------------- |

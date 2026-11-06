@@ -116,7 +116,7 @@ Useful flags:
 | `--testnet` | Index testnet instead of mainnet. |
 | `--skip-dcrd` | Don't install dcrd; connect to an existing node (see below). |
 | `--dcrdserv/-user/-pass/-cert` | Coordinates of an existing dcrd (with `--skip-dcrd`). |
-| `--go-version <v>` | Go toolchain version (default `1.27.1`). |
+| `--go-version <v>` | Go toolchain version (default `1.27.3`). |
 | `--dcrd-version <v>` | dcrd module version to `go install` (default `latest`). dcrd 2.1.6 is module `v1.10.8`; its tag, `release-v2.1.6`, works too. |
 | `--no-repair` | Don't repair a desynced stake database; only report it (see [Troubleshooting](#troubleshooting)). |
 
@@ -156,11 +156,11 @@ dcrdata targets the Go version in `go.mod`. Distro packages are often older, so
 install the official toolchain:
 
 ```sh
-GO_VERSION=1.27.1
+GO_VERSION=1.27.3
 ARCH=$(dpkg --print-architecture)   # amd64 or arm64
 case "$ARCH" in   # sha256 from https://go.dev/dl/; deploy.sh pins the same sums
-  amd64) GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;;
-  arm64) GO_SHA256=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;;
+  amd64) GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;;
+  arm64) GO_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;;
 esac
 curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz
 # Chained so a mismatch leaves the installed Go alone.
@@ -172,7 +172,7 @@ export PATH=$PATH:/usr/local/go/bin
 go version
 ```
 
-> The sums are for 1.27.1. For another version, take the sum from
+> The sums are for 1.27.3. For another version, take the sum from
 > [go.dev/dl](https://go.dev/dl/) rather than from the server that sends the
 > tarball.
 
@@ -350,6 +350,10 @@ apiproto=http
 userealip=true
 trustproxy=true
 allowedhost=explorer.example.com
+
+# Per-client request limits in req/s (defaults shown; 0 disables)
+;api-limit-rps=100
+;insight-limit-rps=20
 EOF
 ```
 

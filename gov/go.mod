@@ -40,21 +40,21 @@ require (
 	github.com/decred/dcrd/txscript/v3 v3.0.1 // indirect
 	github.com/decred/dcrd/txscript/v4 v4.1.2 // indirect
 	github.com/decred/dcrd/wire v1.8.0 // indirect
-	github.com/decred/dcrtime v0.0.0-20191018193024-8d8b4ef0458e // indirect
-	github.com/golang/snappy v0.0.4 // indirect
+	github.com/decred/dcrtime v0.0.0-20250915172213-e35b14e324c3 // indirect
+	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/trillian v1.4.1 // indirect
-	github.com/google/uuid v1.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/schema v1.4.1 // indirect
 	github.com/h2non/go-is-svg v0.0.0-20160927212452-35e8c4b0612c // indirect
-	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.2 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/marcopeereboom/sbox v1.1.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
-	lukechampine.com/blake3 v1.3.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	lukechampine.com/blake3 v1.4.1 // indirect
 )

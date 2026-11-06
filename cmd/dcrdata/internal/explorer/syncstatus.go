@@ -2,6 +2,7 @@ package explorer
 
 import (
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,12 +38,13 @@ type syncStatus struct {
 // status page when new blocks are being appended into the db.
 var blockchainSyncStatus = new(syncStatus)
 
-// SyncStatus defines a thread-safe way to read the sync status updates
+// SyncStatus defines a thread-safe way to read the sync status updates. It
+// returns a copy, since the sync routine updates the progress bars in place.
 func SyncStatus() []SyncStatusInfo {
 	blockchainSyncStatus.RLock()
 	defer blockchainSyncStatus.RUnlock()
 
-	return blockchainSyncStatus.ProgressBars
+	return slices.Clone(blockchainSyncStatus.ProgressBars)
 }
 
 // ShowingSyncStatusPage is a thread-safe way to fetch the

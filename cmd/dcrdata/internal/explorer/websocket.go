@@ -123,7 +123,10 @@ func (wsh *WebsocketHub) setNumClients(n int) {
 // pointer to the new client data object.
 func (wsh *WebsocketHub) RegisterClient(c *hubSpoke, xcChan exchangeChannel) *client {
 	cl := new(client)
-	wsh.Register <- &clientHubSpoke{cl, c, xcChan}
+	select {
+	case wsh.Register <- &clientHubSpoke{cl, c, xcChan}:
+	case <-wsh.quitWSHandler:
+	}
 	return cl
 }
 
@@ -135,9 +138,13 @@ func (wsh *WebsocketHub) registerClient(ch *clientHubSpoke) {
 }
 
 // UnregisterClient unregisters the input websocket connection via the main
-// run() loop.  This call will block if the run() loop is not running.
+// run() loop. This call will block until the run() loop receives it, or the hub
+// is stopped.
 func (wsh *WebsocketHub) UnregisterClient(c *hubSpoke) {
-	wsh.Unregister <- c
+	select {
+	case wsh.Unregister <- c:
+	case <-wsh.quitWSHandler:
+	}
 }
 
 // unregisterClient should only be called from the loop in run().
@@ -318,8 +325,14 @@ func (wsh *WebsocketHub) run() {
 			}
 
 		case update := <-wsh.xcChan:
-			for _, client := range wsh.clients {
-				client.xc <- update
+			for clientSpoke, client := range wsh.clients {
+				// As with the signals above, unregister a client that is not
+				// keeping up rather than block the run loop on it.
+				select {
+				case client.xc <- update:
+				default:
+					wsh.unregisterClient(clientSpoke)
+				}
 			}
 		} // select a.k.a events:
 	} // for {

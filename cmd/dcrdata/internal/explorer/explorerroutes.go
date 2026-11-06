@@ -1399,9 +1399,11 @@ func (exp *explorerUI) TreasuryPage(w http.ResponseWriter, r *http.Request) {
 			exp.StatusPage(w, defaultErrorCode, "invalid n value", "", ExpStatusError)
 			return
 		}
-		if int64(val) > MaxTreasuryRows {
+		// Compare before converting: a value above MaxInt64 would convert to
+		// a negative limit.
+		if val > uint64(MaxTreasuryRows) {
 			log.Warnf("TreasuryPage: requested up to %d address rows, "+
-				"limiting to %d", limitN, MaxTreasuryRows)
+				"limiting to %d", val, MaxTreasuryRows)
 			limitN = MaxTreasuryRows
 		} else {
 			limitN = int64(val)
@@ -1413,7 +1415,7 @@ func (exp *explorerUI) TreasuryPage(w http.ResponseWriter, r *http.Request) {
 	var offset int64
 	if startParam := r.URL.Query().Get("start"); startParam != "" {
 		val, err := strconv.ParseUint(startParam, 10, 64)
-		if err != nil {
+		if err != nil || val > math.MaxInt64 {
 			exp.StatusPage(w, defaultErrorCode, "invalid start value", "", ExpStatusError)
 			return
 		}
@@ -1681,9 +1683,11 @@ func parsePaginationParams(r *http.Request) (txnType string, limitN, offset int6
 			err = fmt.Errorf("invalid n value")
 			return
 		}
-		if int64(val) > MaxAddressRows {
+		// Compare before converting: a value above MaxInt64 would convert to
+		// a negative limit.
+		if val > uint64(MaxAddressRows) {
 			log.Warnf("addressPage: requested up to %d address rows, "+
-				"limiting to %d", limitN, MaxAddressRows)
+				"limiting to %d", val, MaxAddressRows)
 			limitN = MaxAddressRows
 		} else {
 			limitN = int64(val)
@@ -1695,7 +1699,7 @@ func parsePaginationParams(r *http.Request) (txnType string, limitN, offset int6
 	if startParam := r.URL.Query().Get("start"); startParam != "" {
 		var val uint64
 		val, err = strconv.ParseUint(startParam, 10, 64)
-		if err != nil {
+		if err != nil || val > math.MaxInt64 {
 			err = fmt.Errorf("invalid start value")
 			return
 		}
@@ -1772,12 +1776,51 @@ func (exp *explorerUI) homeInfoCopy() *types.HomeInfo {
 	return &hi
 }
 
+// dashboardBlockCount is the number of recent blocks listed on the dashboard.
+const dashboardBlockCount = 8
+
+// dashboardBlocks returns the summaries of the dashboardBlockCount blocks up to
+// and including height, the block whose hash is tipHash. They are fetched from
+// dcrd once per chain tip and shared by every dashboard request until the tip
+// changes; a reorg always changes the tip hash, so a cached set never mixes
+// chains. The returned summaries must not be modified.
+func (exp *explorerUI) dashboardBlocks(ctx context.Context, height int64, tipHash string) []*types.BlockBasic {
+	c := &exp.dashBlocks
+	c.Lock()
+	if tipHash != "" && c.tipHash == tipHash {
+		blocks := c.blocks
+		c.Unlock()
+		return blocks
+	}
+	c.Unlock()
+
+	blocks := exp.dataSource.GetExplorerBlocks(ctx, int(height), int(height)-dashboardBlockCount)
+	if tipHash == "" || len(blocks) == 0 {
+		return blocks
+	}
+	// GetExplorerBlocks leaves a zero summary in place of a block it could not
+	// fetch. Do not cache a set with a gap, and do not cache one fetched for a
+	// tip that does not match its newest block.
+	if blocks[0].Hash != tipHash {
+		return blocks
+	}
+	for _, b := range blocks {
+		if b.Hash == "" {
+			return blocks
+		}
+	}
+	c.Lock()
+	c.tipHash, c.blocks = tipHash, blocks
+	c.Unlock()
+	return blocks
+}
+
 // DashboardV2 renders the redesigned dashboard / network overview (v2 only).
 func (exp *explorerUI) DashboardV2(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	common := exp.commonData(r)
-	height := exp.Height()
-	blocks := exp.dataSource.GetExplorerBlocks(ctx, int(height), int(height)-8)
+	tipHash, height, _ := exp.LastBlock()
+	blocks := exp.dashboardBlocks(ctx, height, tipHash)
 
 	homeInfo := exp.homeInfoCopy()
 
@@ -2239,6 +2282,11 @@ func (exp *explorerUI) AgendaPage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Errorf("fetching Cumulative votes choices count failed: %v", err)
 	}
+	if summary == nil {
+		// No summary for an agenda whose start time is still in the future:
+		// no votes have been cast yet.
+		summary = new(dbtypes.AgendaSummary)
+	}
 
 	// Overrides the default count value with the actual vote choices count
 	// matching data displayed on "Cumulative Vote Choices" and "Vote Choices By
@@ -2395,10 +2443,12 @@ func (exp *explorerUI) ProposalsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// rows and offset are passed to ProposalsAll as int, so values that do not
+	// fit in an int32 are rejected rather than wrapped to negative numbers.
 	rowsCount := uint64(20)
 	if rowsStr := r.URL.Query().Get("rows"); rowsStr != "" {
 		val, err := strconv.ParseUint(rowsStr, 10, 64)
-		if err != nil {
+		if err != nil || val > math.MaxInt32 {
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
@@ -2409,7 +2459,7 @@ func (exp *explorerUI) ProposalsPage(w http.ResponseWriter, r *http.Request) {
 	var offset uint64
 	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
 		val, err := strconv.ParseUint(offsetStr, 10, 64)
-		if err != nil {
+		if err != nil || val > math.MaxInt32 {
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}

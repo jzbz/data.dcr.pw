@@ -271,3 +271,93 @@ func mustEncode(thing interface{}) []byte {
 	}
 	return b
 }
+
+func TestConvertedState(t *testing.T) {
+	bot, err := NewExchangeBot(&ExchangeBotConfig{Index: "USD"})
+	if err != nil {
+		t.Fatalf("NewExchangeBot error: %v", err)
+	}
+	defer func() {
+		for _, ch := range bot.quitChans {
+			close(ch)
+		}
+	}()
+
+	if b := bot.StateBytes(); len(b) != 0 {
+		t.Fatalf("expected empty StateBytes before any update, got %d bytes", len(b))
+	}
+
+	xcState := &ExchangeState{BaseState: BaseState{Price: 0.0005, Volume: 1000}}
+	// SilentUpdate records the exchange's update time, which the bot requires
+	// for the exchange's data to count toward the price.
+	bot.Exchanges[Binance].SilentUpdate(CurrencyPairDCRBTC, xcState)
+	err = bot.updateIndices(&IndexUpdate{
+		Token:        Coinbase,
+		CurrencyPair: BTCIndex,
+		Indices:      FiatIndices{"USD": 60000, "EUR": 50000},
+	})
+	if err != nil {
+		t.Fatalf("updateIndices error: %v", err)
+	}
+	err = bot.updateExchange(&ExchangeUpdate{
+		Token:        Binance,
+		CurrencyPair: CurrencyPairDCRBTC,
+		State:        xcState,
+	})
+	if err != nil {
+		t.Fatalf("updateExchange error: %v", err)
+	}
+	if bot.IsFailed() {
+		t.Fatalf("bot failed after valid updates")
+	}
+
+	state, err := bot.ConvertedState("EUR")
+	if err != nil {
+		t.Fatalf("ConvertedState error: %v", err)
+	}
+	if state.BtcPrice != 50000 {
+		t.Errorf("wrong converted BTC price: wanted 50000, got %f", state.BtcPrice)
+	}
+	if state.Price != 25 {
+		t.Errorf("wrong converted DCR price: wanted 25, got %f", state.Price)
+	}
+
+	// A request for an unavailable currency is an error for that request
+	// only. It must not put the bot into the failed state.
+	if _, err = bot.ConvertedState("XYZ"); err == nil {
+		t.Errorf("no error for unavailable currency")
+	}
+	if _, err = bot.ConvertedRates("XYZ"); err == nil {
+		t.Errorf("no error for unavailable currency")
+	}
+	if bot.IsFailed() {
+		t.Errorf("bot failed after a conversion request for an unavailable currency")
+	}
+
+	b := bot.StateBytes()
+	var decoded ExchangeBotState
+	if err = json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("error decoding StateBytes: %v", err)
+	}
+	if decoded.Price != 30 || decoded.BtcPrice != 60000 {
+		t.Errorf("wrong prices in StateBytes: %f, %f", decoded.Price, decoded.BtcPrice)
+	}
+	// Cached until the next update.
+	if b2 := bot.StateBytes(); &b2[0] != &b[0] {
+		t.Errorf("StateBytes re-encoded an unchanged state")
+	}
+	err = bot.updateIndices(&IndexUpdate{
+		Token:        Coinbase,
+		CurrencyPair: BTCIndex,
+		Indices:      FiatIndices{"USD": 70000},
+	})
+	if err != nil {
+		t.Fatalf("updateIndices error: %v", err)
+	}
+	if err = json.Unmarshal(bot.StateBytes(), &decoded); err != nil {
+		t.Fatalf("error decoding StateBytes: %v", err)
+	}
+	if decoded.BtcPrice != 70000 {
+		t.Errorf("StateBytes not updated: BTC price %f", decoded.BtcPrice)
+	}
+}

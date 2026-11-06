@@ -663,7 +663,8 @@ func _main(ctx context.Context) error {
 	}
 
 	// Configure the URL path to http handler router for the API.
-	apiMux := api.NewAPIRouter(app, cfg.IndentJSON, cfg.UseRealIP, cfg.CompressAPI)
+	apiMux := api.NewAPIRouter(app, cfg.IndentJSON, cfg.UseRealIP, cfg.CompressAPI,
+		cfg.APIReqRateLimit)
 
 	// File downloads piggy-back on the API.
 	fileMux := api.NewFileRouter(app, cfg.UseRealIP)
@@ -675,19 +676,13 @@ func _main(ctx context.Context) error {
 		webMux.Use(mw.Server(cfg.ServerHeader))
 	}
 
-	// Request per sec limit for "POST /verify-message" endpoint.
-	reqPerSecLimit := 5.0
-	// Create a rate limiter struct.
-	limiter := mw.NewLimiter(reqPerSecLimit)
-	limiter.SetMessage(fmt.Sprintf(
-		"You have reached the maximum request limit (%g req/s)", reqPerSecLimit))
-
+	// Rate limiters identify clients by RemoteAddr, which RealIP sets from the
+	// headers of a trusted proxy. Without userealip, forwarding headers are
+	// not trusted, since a client could set them to evade the limits.
 	if cfg.UseRealIP {
 		webMux.Use(middleware.RealIP)
-		// RealIP sets RemoteAddr
-		limiter.SetIPLookups([]string{"RemoteAddr"})
 	} else {
-		limiter.SetIPLookups([]string{"X-Forwarded-For", "X-Real-IP", "RemoteAddr"})
+		webMux.Use(mw.WarnForwardedHeaders())
 	}
 
 	webMux.Use(middleware.Recoverer)
@@ -790,7 +785,8 @@ func _main(ctx context.Context) error {
 		// fallback.
 		r.With(explorer.MenuFormParser).Post("/set", explore.DashboardV2)
 		r.Get("/verify-message", explore.VerifyMessagePage)
-		r.With(mw.Tollbooth(limiter)).Post("/verify-message", explore.VerifyMessageHandler)
+		// Request per sec limit for the "POST /verify-message" endpoint.
+		r.With(mw.RateLimiter(5)).Post("/verify-message", explore.VerifyMessageHandler)
 
 		// Pages that can be cached because they depend on block and/or mempool data cached by
 		// *explorer.explorerUI. This middleware sets ETag and Last-Modified headers that are

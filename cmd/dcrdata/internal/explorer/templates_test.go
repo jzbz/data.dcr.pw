@@ -1,6 +1,10 @@
 package explorer
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -270,4 +274,59 @@ func TestAmountAsDecimalPartsTrimmed(t *testing.T) {
 				expected[i].whole, expected[i].frac, expected[i].tail)
 		}
 	}
+}
+
+// TestTemplatesConcurrentReload exercises the template map from concurrent
+// requests in reload mode and from a concurrent full reload, as SIGUSR1 does.
+// Run with -race; unguarded map access is also a fatal runtime error.
+func TestTemplatesConcurrentReload(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"chrome.tmpl": `{{define "chrome"}}<html>{{end}}`,
+		"a.tmpl":      `{{define "a"}}{{template "chrome"}}a{{.}}{{end}}`,
+		"b.tmpl":      `{{define "b"}}{{template "chrome"}}b{{.}}{{end}}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tmpls := newTemplates(dir, true, []string{"chrome"}, nil)
+	for _, name := range []string{"a", "b"} {
+		if err := tmpls.addTemplate(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		name := []string{"a", "b"}[i%2]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				out, err := tmpls.exec(name, j)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if want := fmt.Sprintf("<html>%s%d", name, j); out != want {
+					t.Errorf("got %q, want %q", out, want)
+					return
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 50; j++ {
+			if err := tmpls.reloadTemplates(); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

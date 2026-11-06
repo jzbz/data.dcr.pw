@@ -647,7 +647,7 @@ func (iapi *InsightApi) getTransactions(w http.ResponseWriter, r *http.Request) 
 		}
 
 		blockTransactions := apitypes.InsightBlockAddrTxSummary{
-			PagesTotal: int64(txCount),
+			PagesTotal: int64(pagesTotal),
 			Txs:        txsNew,
 		}
 		writeJSON(w, blockTransactions, m.GetIndentCtx(r))

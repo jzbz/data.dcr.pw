@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/v3"
@@ -29,6 +30,10 @@ type pageTemplate struct {
 }
 
 type templates struct {
+	// mtx guards templates. Both are pointers so that copies of a templates
+	// value share the map and its lock. With template reloading, requests
+	// write the map concurrently with other requests and the SIGUSR1 reload.
+	mtx       *sync.RWMutex
 	templates map[string]pageTemplate
 	common    []string
 	folder    string
@@ -42,6 +47,7 @@ func newTemplates(folder string, reload bool, common []string, helpers template.
 		com = append(com, filepath.Join(folder, file+".tmpl"))
 	}
 	t := templates{
+		mtx:       new(sync.RWMutex),
 		templates: make(map[string]pageTemplate),
 		common:    com,
 		folder:    folder,
@@ -60,17 +66,26 @@ func (t *templates) addTemplate(name string) error {
 	files := append(t.common, fileName)
 	temp, err := template.New(name).Funcs(t.helpers).ParseFiles(files...)
 	if err == nil {
+		t.mtx.Lock()
 		t.templates[name] = pageTemplate{
 			file:     fileName,
 			template: temp,
 		}
+		t.mtx.Unlock()
 	}
 	return err
 }
 
 func (t *templates) reloadTemplates() error {
+	t.mtx.RLock()
+	names := make([]string, 0, len(t.templates))
+	for name := range t.templates {
+		names = append(names, name)
+	}
+	t.mtx.RUnlock()
+
 	var errorStrings []string
-	for fileName := range t.templates {
+	for _, fileName := range names {
 		err := t.addTemplate(fileName)
 		if err != nil {
 			errorStrings = append(errorStrings, err.Error())
@@ -88,7 +103,9 @@ func (t *templates) reloadTemplates() error {
 // writing to theclient, otherwise you might as well execute directly into
 // your response writer instead of the internal buffer of this function.
 func (t *templates) execTemplateToString(name string, data interface{}) (string, error) {
+	t.mtx.RLock()
 	temp, ok := t.templates[name]
+	t.mtx.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("Template %s not known", name)
 	}

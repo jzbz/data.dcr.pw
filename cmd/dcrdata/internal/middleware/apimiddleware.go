@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
@@ -43,8 +44,6 @@ const (
 	ctxTxns
 	ctxTxInOutIndex
 	ctxN
-	ctxCount
-	ctxOffset
 	ctxPageNum
 	CtxBlockDate
 	CtxLimit
@@ -85,9 +84,48 @@ type Limiter struct {
 }
 
 // NewLimiter creates a new Limiter for the given maximum allowed request rate
-// in requests per second (may be fractional).
+// in requests per second (may be fractional). Clients are identified only by
+// the request's RemoteAddr, never by a client-supplied header. When there is a
+// trusted reverse proxy, install chi's RealIP middleware before the limiter so
+// that RemoteAddr holds the client's address rather than the proxy's.
 func NewLimiter(max float64) *Limiter {
-	return &Limiter{tollbooth.NewLimiter(max, nil)}
+	lim := tollbooth.NewLimiter(max, nil)
+	lim.SetIPLookups([]string{"RemoteAddr"})
+	lim.SetMessage(fmt.Sprintf(
+		"You have reached the maximum request limit (%g req/s)", max))
+	return &Limiter{lim}
+}
+
+// RateLimiter creates a middleware that limits each client to max requests per
+// second using a new Limiter. If max is not positive, the returned middleware
+// does not limit requests.
+func RateLimiter(max float64) func(http.Handler) http.Handler {
+	if max <= 0 {
+		return Next
+	}
+	return Tollbooth(NewLimiter(max))
+}
+
+// WarnForwardedHeaders creates a middleware that logs a warning, once, on the
+// first request carrying an X-Forwarded-For or X-Real-IP header. It is meant
+// for use when these headers are not trusted, since the presence of either
+// suggests a reverse proxy, in which case all clients share the rate limits of
+// the proxy's address.
+func WarnForwardedHeaders() func(http.Handler) http.Handler {
+	var once sync.Once
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" {
+				once.Do(func() {
+					apiLog.Warnf("Received a request with an X-Forwarded-For or X-Real-IP " +
+						"header, but userealip is not set. These headers are ignored, and " +
+						"rate limits apply to the connecting address. If dcrdata is behind " +
+						"a trusted reverse proxy, set userealip.")
+				})
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // Tollbooth creates a new rate limiter middleware using the provided Limiter.
@@ -245,6 +283,16 @@ func OriginalRequestURI(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Accept only a local path (origin-form request target). A scheme,
+			// host, or a path starting with "//" could make a redirect built
+			// from the path point to another site.
+			if newURL.Scheme != "" || newURL.Host != "" || newURL.Opaque != "" ||
+				!strings.HasPrefix(newURL.Path, "/") || strings.HasPrefix(newURL.Path, "//") ||
+				strings.HasPrefix(newURL.Path, "/\\") {
+				apiLog.Debugf("X-Original-Request-URI (%s) is not a local path", origRequestURI)
+				next.ServeHTTP(w, r)
+				return
+			}
 			// Patch the the Requests URL's Path and RawPath so that
 			// (*http.Request).URL.RequestURI() may assemble escaped path?query.
 			r.URL.Path = newURL.Path
@@ -337,6 +385,11 @@ func Next(next http.Handler) http.Handler {
 	})
 }
 
+// maxTxnsPerPost is the maximum number of transaction IDs accepted in the body
+// of a POST request handled by PostTxnsCtx. Each transaction ID costs a
+// getrawtransaction RPC to dcrd.
+const maxTxnsPerPost = 1000
+
 // PostTxnsCtx extract transaction IDs from the POST body
 func PostTxnsCtx(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +405,11 @@ func PostTxnsCtx(next http.Handler) http.Handler {
 		if err != nil {
 			apiLog.Debugf("failed to unmarshal JSON request to apitypes.Txns: %v", err)
 			http.Error(w, "failed to unmarshal JSON request", http.StatusBadRequest)
+			return
+		}
+		if len(req.Transactions) > maxTxnsPerPost {
+			http.Error(w, fmt.Sprintf("too many transactions (maximum %d)", maxTxnsPerPost),
+				http.StatusUnprocessableEntity)
 			return
 		}
 		// Successful extraction of body JSON
@@ -476,28 +534,6 @@ func GetChartGroupingCtx(r *http.Request) string {
 		return ""
 	}
 	return chartType
-}
-
-// GetCountCtx retrieves the ctxCount data ("to") URL path element from the
-// request context. If not set, the return value is 20.
-func GetCountCtx(r *http.Request) int {
-	count, ok := r.Context().Value(ctxCount).(int)
-	if !ok {
-		apiLog.Warn("count is not set or is not an int")
-		return 20
-	}
-	return count
-}
-
-// GetOffsetCtx retrieves the ctxOffset data ("from") from the request context.
-// If not set, the return value is 0.
-func GetOffsetCtx(r *http.Request) int {
-	offset, ok := r.Context().Value(ctxOffset).(int)
-	if !ok {
-		apiLog.Warn("offset is not set or is not an int")
-		return 0
-	}
-	return offset
 }
 
 // GetPageNumCtx retrieves the ctxPageNum data ("pageNum") URL path element from
@@ -717,16 +753,6 @@ func ProposalTokenCtx(next http.Handler) http.Handler {
 	})
 }
 
-// BlockHashPathCtx returns a http.HandlerFunc that embeds the value at the url
-// part {blockhash} into the request context.
-func BlockHashPathCtx(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hash := chi.URLParam(r, "blockhash")
-		ctx := context.WithValue(r.Context(), ctxBlockHash, hash)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 // TransactionHashCtx returns a http.HandlerFunc that embeds the value at the
 // url part {txid} into the request context.
 func TransactionHashCtx(next http.Handler) http.Handler {
@@ -844,49 +870,17 @@ func APIDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 // TransactionsCtx returns a http.Handlerfunc that embeds the {address,
-// blockhash} value in the request into the request context.
+// blockhash} values in the request into the request context. The next handler
+// is called once, whether one, both, or neither of the values is present.
 func TransactionsCtx(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		address := r.FormValue("address")
-		if address != "" {
-			ctx := context.WithValue(r.Context(), CtxAddress, []string{address})
-			next.ServeHTTP(w, r.WithContext(ctx))
+		ctx := r.Context()
+		if address := r.FormValue("address"); address != "" {
+			ctx = context.WithValue(ctx, CtxAddress, []string{address})
 		}
-
-		hash := r.FormValue("block")
-		if hash != "" {
-			ctx := context.WithValue(r.Context(), ctxBlockHash, hash)
-			next.ServeHTTP(w, r.WithContext(ctx))
+		if hash := r.FormValue("block"); hash != "" {
+			ctx = context.WithValue(ctx, ctxBlockHash, hash)
 		}
-	})
-}
-
-// PaginationCtx returns a http.Handlerfunc that embeds the {to,from} value in
-// the request into the request context.
-func PaginationCtx(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		to, from := r.FormValue("to"), r.FormValue("from")
-		if to == "" {
-			to = "20"
-		}
-
-		if from == "" {
-			from = "0"
-		}
-
-		offset, err := strconv.Atoi(from)
-		if err != nil {
-			http.Error(w, "invalid from value", 422)
-			return
-		}
-		count, err := strconv.Atoi(to)
-		if err != nil {
-			http.Error(w, "invalid to value", 422)
-			return
-		}
-
-		ctx := context.WithValue(r.Context(), ctxCount, count)
-		ctx = context.WithValue(ctx, ctxOffset, offset)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -911,33 +905,6 @@ func PageNumCtx(next http.Handler) http.Handler {
 	})
 }
 
-// AddressPostCtx returns a http.HandlerFunc that embeds the {addrs} value in
-// the post request into the request context.
-func AddressPostCtx(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		address := r.PostFormValue("addrs")
-		ctx := context.WithValue(r.Context(), CtxAddress, []string{address})
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// BlockDateQueryCtx returns a http.Handlerfunc that embeds the {blockdate,
-// limit} value in the request into the request context.
-func BlockDateQueryCtx(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		blockDate := r.FormValue("blockDate")
-		limit := r.FormValue("limit")
-		if blockDate == "" {
-			http.Error(w, "invalid block date", 422)
-			return
-		}
-		fmt.Println("limit in block query ", limit)
-		ctx := context.WithValue(r.Context(), CtxBlockDate, blockDate)
-		ctx = context.WithValue(ctx, CtxLimit, limit)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 // AgendaIdCtx returns a http.HandlerFunc that embeds the value at the url part
 // {agendaId} into the request context.
 func AgendaIdCtx(next http.Handler) http.Handler {
@@ -946,12 +913,6 @@ func AgendaIdCtx(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxAgendaId, agendaId)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-// AgendIdCtx returns a http.HandlerFunc that embeds the value at the url part
-// {agendaId} into the request context. This is here for backward compatibility.
-func AgendIdCtx(next http.Handler) http.Handler {
-	return AgendaIdCtx(next)
 }
 
 // GetAgendaIdCtx retrieves the ctxAgendaId data from the request context.

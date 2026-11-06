@@ -58,12 +58,14 @@ const (
 		FROM stats JOIN blocks ON stats.blocks_id = blocks.id
 		WHERE stats.height BETWEEN $1 AND $2
 			AND is_mainchain
+		ORDER BY stats.height
 	;`
 
 	SelectPoolValSizeRange = `
-		SELECT poolsize, poolval
-		FROM stats
-		WHERE height BETWEEN $1 AND $2
+		SELECT stats.pool_size, stats.pool_val
+		FROM stats JOIN blocks ON stats.blocks_id = blocks.id
+		WHERE stats.height BETWEEN $1 AND $2
 			AND is_mainchain
+		ORDER BY stats.height
 	;`
 )

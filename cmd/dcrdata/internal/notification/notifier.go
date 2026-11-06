@@ -35,9 +35,16 @@ import (
 	"github.com/decred/dcrdata/v8/txhelpers"
 )
 
-// SyncHandlerDeadline is a hard deadline for handlers to finish handling before
-// an error is logged.
+// SyncHandlerDeadline is a hard deadline for handlers to finish handling. A
+// block or reorg handler group that misses it is treated as a failure: the
+// notification is abandoned and the fatal handler is invoked.
 const SyncHandlerDeadline = time.Minute * 5
+
+// maxQueuedTxns bounds the number of mempool transaction notifications waiting
+// to be processed. Transactions beyond it are dropped rather than queued; the
+// mempool monitor recollects the full mempool on every new block, so a dropped
+// notification only delays when that transaction appears.
+const maxQueuedTxns = 1024
 
 // BranchTips describes the old and new chain tips involved in a reorganization.
 type BranchTips struct {
@@ -68,11 +75,12 @@ type ReorgHandler func(*txhelpers.ReorgData) error
 type Notifier struct {
 	node DCRDNode
 	// The anyQ sequences all dcrd notification in the order they are received.
-	anyQ     chan interface{}
+	anyQ     *ntfnQueue
 	tx       [][]TxHandler
 	block    [][]BlockHandler
 	reorg    [][]ReorgHandler
 	fatal    func()
+	deadline time.Duration
 	previous struct {
 		hash   chainhash.Hash
 		height uint32
@@ -82,13 +90,103 @@ type Notifier struct {
 // NewNotifier is the constructor for a Notifier.
 func NewNotifier() *Notifier {
 	return &Notifier{
-		// anyQ can cause deadlocks if it gets full. All mempool transactions pass
-		// through here, so the size should stay pretty big to accommodate for the
-		// inevitable explosive growth of the network.
-		anyQ:  make(chan interface{}, 1024),
-		tx:    make([][]TxHandler, 0),
-		block: make([][]BlockHandler, 0),
-		reorg: make([][]ReorgHandler, 0),
+		anyQ:     newNtfnQueue(),
+		tx:       make([][]TxHandler, 0),
+		block:    make([][]BlockHandler, 0),
+		reorg:    make([][]ReorgHandler, 0),
+		deadline: SyncHandlerDeadline,
+	}
+}
+
+// ntfnQueue is the FIFO between the dcrd notification callbacks and
+// superQueue. The callbacks run on the rpcclient goroutine that reads the
+// node's websocket, which is also the goroutine that delivers every RPC
+// response. A callback that blocks therefore stalls every dcrd RPC, including
+// the ones the handlers draining the queue are waiting on, which is a deadlock.
+// So push never blocks: blocks and reorgs are always queued, since skipping one
+// would leave the Notifier unable to connect any further blocks, and they
+// arrive at the rate the chain produces them. Mempool transactions, whose rate
+// is set by the network, are capped at maxQueuedTxns and dropped beyond that.
+type ntfnQueue struct {
+	mtx     sync.Mutex
+	items   []interface{}
+	numTxns int
+	dropped int
+	// ready holds a token whenever items may be non-empty.
+	ready chan struct{}
+}
+
+func newNtfnQueue() *ntfnQueue {
+	return &ntfnQueue{
+		ready: make(chan struct{}, 1),
+	}
+}
+
+// push appends a notification to the queue without blocking. It reports false
+// if the notification was a transaction that was dropped because the queue
+// already holds maxQueuedTxns transactions.
+func (q *ntfnQueue) push(item interface{}) bool {
+	_, isTx := item.(*chainjson.TxRawResult)
+
+	q.mtx.Lock()
+	if isTx && q.numTxns >= maxQueuedTxns {
+		q.dropped++
+		first := q.dropped == 1
+		q.mtx.Unlock()
+		if first {
+			log.Warnf("Notification queue holds %d transactions. Dropping new "+
+				"mempool transaction notifications until it drains.", maxQueuedTxns)
+		}
+		return false
+	}
+	if isTx {
+		q.numTxns++
+	}
+	dropped := q.dropped
+	q.dropped = 0
+	q.items = append(q.items, item)
+	q.mtx.Unlock()
+
+	if dropped > 0 {
+		log.Warnf("Dropped %d mempool transaction notifications while the "+
+			"notification queue was full.", dropped)
+	}
+
+	select {
+	case q.ready <- struct{}{}:
+	default: // a token is already pending
+	}
+	return true
+}
+
+// pop removes and returns the oldest notification, waiting for one if the
+// queue is empty. It returns false once ctx is done.
+func (q *ntfnQueue) pop(ctx context.Context) (interface{}, bool) {
+	for {
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		q.mtx.Lock()
+		if len(q.items) > 0 {
+			item := q.items[0]
+			q.items[0] = nil
+			q.items = q.items[1:]
+			if len(q.items) == 0 {
+				q.items = nil // release the backing array
+			}
+			if _, isTx := item.(*chainjson.TxRawResult); isTx {
+				q.numTxns--
+			}
+			q.mtx.Unlock()
+			return item, true
+		}
+		q.mtx.Unlock()
+
+		select {
+		case <-q.ready:
+		case <-ctx.Done():
+			return nil, false
+		}
 	}
 }
 
@@ -138,30 +236,28 @@ func (notifier *Notifier) DcrdHandlers() *rpcclient.NotificationHandlers {
 // handlers should perform any pre-processing and type conversion and then
 // deposit the payload into the anyQ channel.
 func (notifier *Notifier) superQueue(ctx context.Context) {
-out:
 	for {
-		select {
-		case rawMsg := <-notifier.anyQ:
-			// Do not allow new blocks to process while running reorg. Only allow
-			// them to be processed after this reorg completes.
-			switch msg := rawMsg.(type) {
-			case *wire.BlockHeader:
-				// Process the new block.
-				log.Infof("superQueue: Processing new block %v (height %d).", msg.BlockHash(), msg.Height)
-				notifier.processBlock(msg)
-			case BranchTips:
-				// Process the reorg.
-				log.Infof("superQueue: Processing reorganization from %s (height %d) to %s (height %d).",
-					msg.OldChainHead.String(), msg.OldChainHeight,
-					msg.NewChainHead.String(), msg.NewChainHeight)
-				notifier.signalReorg(msg)
-			case *chainjson.TxRawResult:
-				notifier.processTx(msg)
-			default:
-				log.Warn("unknown message type in superQueue: %T", rawMsg)
-			}
-		case <-ctx.Done():
-			break out
+		rawMsg, ok := notifier.anyQ.pop(ctx)
+		if !ok {
+			return
+		}
+		// Do not allow new blocks to process while running reorg. Only allow
+		// them to be processed after this reorg completes.
+		switch msg := rawMsg.(type) {
+		case *wire.BlockHeader:
+			// Process the new block.
+			log.Infof("superQueue: Processing new block %v (height %d).", msg.BlockHash(), msg.Height)
+			notifier.processBlock(msg)
+		case BranchTips:
+			// Process the reorg.
+			log.Infof("superQueue: Processing reorganization from %s (height %d) to %s (height %d).",
+				msg.OldChainHead.String(), msg.OldChainHeight,
+				msg.NewChainHead.String(), msg.NewChainHeight)
+			notifier.signalReorg(msg)
+		case *chainjson.TxRawResult:
+			notifier.processTx(msg)
+		default:
+			log.Warnf("unknown message type in superQueue: %T", rawMsg)
 		}
 	}
 }
@@ -182,7 +278,7 @@ func (notifier *Notifier) onBlockConnected(blockHeaderSerialized []byte, _ [][]b
 
 	log.Debugf("OnBlockConnected: %d / %v (previous: %v)", height, hash, prevHash)
 
-	notifier.anyQ <- blockHeader
+	notifier.anyQ.push(blockHeader)
 }
 
 // rpcclient.NotificationHandlers.OnBlockDisconnected
@@ -208,19 +304,19 @@ func (notifier *Notifier) onReorganization(oldHash *chainhash.Hash, oldHeight in
 	log.Tracef("OnReorganization: %d / %s --> %d / %s",
 		oldHeight, oldHash, newHeight, newHash)
 
-	notifier.anyQ <- BranchTips{
+	notifier.anyQ.push(BranchTips{
 		OldChainHead:   *oldHash,
 		OldChainHeight: oldHeight,
 		NewChainHead:   *newHash,
 		NewChainHeight: newHeight,
-	}
+	})
 }
 
 // rpcclient.NotificationHandlers.OnTxAcceptedVerbose
 func (notifier *Notifier) onTxAcceptedVerbose(tx *chainjson.TxRawResult) {
 	// Current UNIX time to assign the new transaction.
 	tx.Time = time.Now().Unix()
-	notifier.anyQ <- tx
+	notifier.anyQ.push(tx)
 }
 
 // RegisterTxHandlerGroup adds a group of tx handlers. Groups are run
@@ -264,7 +360,8 @@ func (notifier *Notifier) RegisterReorgHandlerGroup(handlers ...ReorgHandler) {
 	notifier.reorg = append(notifier.reorg, handlers)
 }
 
-// SetFatalHandler registers a callback invoked when a handler group fails and
+// SetFatalHandler registers a callback invoked when a block or reorg handler
+// group fails or misses SyncHandlerDeadline, or a reorg cannot be resolved, and
 // the notification is abandoned. Once that happens the Notifier cannot connect
 // any further blocks — the abandoned block is deliberately not recorded, so
 // every subsequent block fails the connects-to check in processBlock — so the
@@ -285,6 +382,14 @@ func (notifier *Notifier) SetFatalHandler(f func()) {
 func (notifier *Notifier) SetPreviousBlock(prevHash chainhash.Hash, prevHeight uint32) {
 	notifier.previous.hash = prevHash
 	notifier.previous.height = prevHeight
+}
+
+// abandon invokes the fatal handler, if one is set, after a block or reorg
+// notification has been abandoned.
+func (notifier *Notifier) abandon() {
+	if notifier.fatal != nil {
+		notifier.fatal()
+	}
 }
 
 func functionName(i interface{}) string {
@@ -335,8 +440,15 @@ func (notifier *Notifier) processBlock(bh *wire.BlockHeader) {
 		}()
 		select {
 		case <-done:
-		case <-time.NewTimer(SyncHandlerDeadline).C:
-			log.Errorf("at least 1 block handler has not completed before the deadline")
+		case <-time.After(notifier.deadline):
+			// A handler still running past the deadline is no different from
+			// one that failed: the block cannot be recorded as connected, so
+			// every later block would fail the connects-to check above.
+			log.Errorf("Abandoning block %d (%v): at least 1 block handler has "+
+				"not completed before the deadline. No further blocks can be "+
+				"connected; restarting resumes from the last consistent height.",
+				height, hash)
+			notifier.abandon()
 			return
 		}
 
@@ -351,9 +463,7 @@ func (notifier *Notifier) processBlock(bh *wire.BlockHeader) {
 			log.Errorf("Abandoning block %d (%v) after a handler failure. No "+
 				"further blocks can be connected; restarting resumes from the "+
 				"last consistent height.", height, hash)
-			if notifier.fatal != nil {
-				notifier.fatal()
-			}
+			notifier.abandon()
 			return
 		}
 	}
@@ -387,7 +497,7 @@ func (notifier *Notifier) processTx(tx *chainjson.TxRawResult) {
 		}()
 		select {
 		case <-done:
-		case <-time.NewTimer(SyncHandlerDeadline).C:
+		case <-time.After(notifier.deadline):
 			log.Errorf("at least 1 tx handler has not completed before the deadline")
 			return
 		}
@@ -407,7 +517,13 @@ func (notifier *Notifier) signalReorg(d BranchTips) {
 	ancestor, newChain, oldChain, err := rpcutils.CommonAncestor(notifier.node,
 		d.NewChainHead, d.OldChainHead)
 	if err != nil {
-		log.Errorf("Failed to determine common ancestor. Aborting reorg.")
+		// Nothing has changed in the data stores, but the new chain's blocks
+		// do not connect to the recorded best block, so none could be
+		// connected after this.
+		log.Errorf("Failed to determine common ancestor: %v. Aborting reorg to "+
+			"%v (%d). No further blocks can be connected; restarting resumes "+
+			"from the last consistent height.", err, d.NewChainHead, d.NewChainHeight)
+		notifier.abandon()
 		return
 	}
 
@@ -444,8 +560,12 @@ func (notifier *Notifier) signalReorg(d BranchTips) {
 		}()
 		select {
 		case <-done:
-		case <-time.NewTimer(SyncHandlerDeadline).C:
-			log.Errorf("at least 1 reorg handler has not completed before the deadline")
+		case <-time.After(notifier.deadline):
+			log.Errorf("Abandoning reorg to %v (%d): at least 1 reorg handler "+
+				"has not completed before the deadline. No further blocks can be "+
+				"connected; restarting resumes from the last consistent height.",
+				d.NewChainHead, d.NewChainHeight)
+			notifier.abandon()
 			return
 		}
 
@@ -457,9 +577,7 @@ func (notifier *Notifier) signalReorg(d BranchTips) {
 			log.Errorf("Abandoning reorg to %v (%d) after a handler failure. No "+
 				"further blocks can be connected; restarting resumes from the "+
 				"last consistent height.", d.NewChainHead, d.NewChainHeight)
-			if notifier.fatal != nil {
-				notifier.fatal()
-			}
+			notifier.abandon()
 			return
 		}
 	}

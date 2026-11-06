@@ -241,6 +241,15 @@ type explorerUI struct {
 	invsMtx sync.RWMutex
 	invs    *types.MempoolInfo
 	premine int64
+
+	// dashBlocks caches the dashboard's recent block summaries for the chain
+	// tip they were fetched at, so the dashboard does not refetch them from
+	// dcrd on every request.
+	dashBlocks struct {
+		sync.Mutex
+		tipHash string
+		blocks  []*types.BlockBasic
+	}
 }
 
 // AreDBsSyncing is a thread-safe way to fetch the boolean in dbsSyncing.
@@ -477,7 +486,11 @@ func (exp *explorerUI) Store(blockData *blockdata.BlockData, msgBlock *wire.MsgB
 	ctx := context.TODO()
 
 	// Retrieve block data for the passed block hash.
-	newBlockData := exp.dataSource.GetExplorerBlock(ctx, msgBlock.BlockHash().String())
+	blockHash := msgBlock.BlockHash()
+	newBlockData := exp.dataSource.GetExplorerBlock(ctx, blockHash.String())
+	if newBlockData == nil {
+		return fmt.Errorf("unable to get explorer block data for block %v", blockHash)
+	}
 
 	// Use the latest block's blocktime to get the last 24hr timestamp.
 	day := 24 * time.Hour

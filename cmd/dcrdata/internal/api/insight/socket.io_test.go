@@ -3,6 +3,10 @@ package insight
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/decred/dcrd/chaincfg/v3"
+	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v4"
+	"github.com/decred/dcrd/wire"
 )
 
 func TestMarshalInsightTx(t *testing.T) {
@@ -47,5 +51,20 @@ func TestMarshalInsightTxSlice(t *testing.T) {
 	if string(b) != expectedJSON {
 		t.Errorf("json.Marshal of InsightSocketVout incorrect. "+
 			"Expected %s, got %s", expectedJSON, string(b))
+	}
+}
+
+func TestSendNewTxVoutsMismatch(t *testing.T) {
+	soc := &SocketServer{
+		params:           chaincfg.MainNetParams(),
+		watchedAddresses: &roomSubscriptionCounter{c: make(map[string]int)},
+	}
+	tx := wire.NewMsgTx()
+	tx.AddTxOut(wire.NewTxOut(1, nil))
+	tx.AddTxOut(wire.NewTxOut(2, nil))
+	// One vout for a transaction with two outputs must be rejected rather than
+	// indexed out of range.
+	if err := soc.sendNewTx(tx, make([]chainjson.Vout, 1)); err == nil {
+		t.Fatal("expected an error for mismatched vouts")
 	}
 }

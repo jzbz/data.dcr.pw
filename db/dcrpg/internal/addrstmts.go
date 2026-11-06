@@ -234,7 +234,8 @@ const (
 			addresses.value,
 			transactions.block_height,
 			addresses.block_time,
-			addresses.tx_vin_vout_index
+			addresses.tx_vin_vout_index,
+			vouts.tx_tree
 		FROM addresses
 		JOIN transactions ON
 			addresses.tx_hash = transactions.tx_hash

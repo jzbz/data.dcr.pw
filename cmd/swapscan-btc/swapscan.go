@@ -105,6 +105,11 @@ func mainCore() int {
 			fmt.Printf("%d\n", i)
 		}
 
+		if len(msgBlock.Transactions) == 0 {
+			fmt.Fprintf(os.Stderr, "ERROR: block %s has no transactions\n", msgBlock.BlockHash())
+			return 4
+		}
+
 		// Check all regular tree txns except coinbase.
 		for _, tx := range msgBlock.Transactions[1:] {
 			swapRes, err := swap.MsgTxAtomicSwapsInfo(tx, nil, params)
@@ -123,6 +128,10 @@ func mainCore() int {
 				contractTx, err := client.GetRawTransaction(red.ContractTx)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR: GetRawTransaction failed (%s): %v\n", red.ContractTx, err)
+					return 4
+				}
+				if int(red.ContractVout) >= len(contractTx.MsgTx().TxOut) {
+					fmt.Fprintf(os.Stderr, "ERROR: contract output %s:%d does not exist\n", red.ContractTx, red.ContractVout)
 					return 4
 				}
 				red.Value = contractTx.MsgTx().TxOut[red.ContractVout].Value
@@ -149,6 +158,10 @@ func mainCore() int {
 				contractTx, err := client.GetRawTransaction(ref.ContractTx)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR: GetRawTransaction failed (%s): %v\n", ref.ContractTx, err)
+					return 4
+				}
+				if int(ref.ContractVout) >= len(contractTx.MsgTx().TxOut) {
+					fmt.Fprintf(os.Stderr, "ERROR: contract output %s:%d does not exist\n", ref.ContractTx, ref.ContractVout)
 					return 4
 				}
 				ref.Value = contractTx.MsgTx().TxOut[ref.ContractVout].Value

@@ -214,3 +214,24 @@ func TestOrphanedTipLength(t *testing.T) {
 		t.Fatal(fmt.Errorf("Unexpected results from OrphanedTipLength test 5"))
 	}
 }
+
+func TestIsLoopbackHost(t *testing.T) {
+	tests := map[string]bool{
+		"localhost:9109":       true,
+		"LOCALHOST:9109":       true,
+		"127.0.0.1:9109":       true,
+		"127.0.0.2:9109":       true,
+		"[::1]:9109":           true,
+		"localhost":            true,
+		"::1":                  true,
+		"10.0.0.5:9109":        false,
+		"dcrd:9109":            false,
+		"node.example.com:443": false,
+		"[2001:db8::1]:9109":   false,
+	}
+	for in, want := range tests {
+		if got := isLoopbackHost(in); got != want {
+			t.Errorf("isLoopbackHost(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

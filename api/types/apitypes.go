@@ -676,7 +676,7 @@ func (s *Status) DBUpdate(height uint32, blockTime int64) {
 	s.Lock()
 	s.dbHeight = height
 	s.dbLastBlockTime = blockTime
-	s.ready = s.dbHeight == s.height
+	s.ready = s.dbHeight == s.height && s.nodeConnections > 0
 	s.Unlock()
 }
 

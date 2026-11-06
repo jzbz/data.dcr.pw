@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/decred/dcrd/blockchain/stake/v5"
@@ -258,7 +259,7 @@ type ChainDB struct {
 	CacheLocks         cacheLocks
 	devPrefetch        bool
 	InBatchSync        bool
-	InReorg            bool
+	InReorg            atomic.Bool
 	tpUpdatePermission map[dbtypes.TimeBasedGrouping]*trylock.Mutex
 	utxoCache          utxoStore
 	mixSetDiffsMtx     sync.Mutex
@@ -1937,7 +1938,7 @@ func (pgb *ChainDB) FreshenAddressCaches(lazyProjectFund bool, expireAddresses [
 
 	// Do not initiate project fund queries if a reorg is in progress, or
 	// pre-fetch is disabled.
-	if !pgb.devPrefetch || pgb.InReorg {
+	if !pgb.devPrefetch || pgb.InReorg.Load() {
 		return nil
 	}
 
@@ -1965,7 +1966,7 @@ func (pgb *ChainDB) DevBalance(ctx context.Context) (*dbtypes.AddressBalance, er
 		return cachedBalance, nil
 	}
 
-	if !pgb.InReorg {
+	if !pgb.InReorg.Load() {
 		bal, _, err := pgb.AddressBalance(ctx, pgb.devAddress)
 		if err != nil {
 			return nil, err
@@ -2604,13 +2605,23 @@ func (pgb *ChainDB) FillAddressTransactions(ctx context.Context, addrInfo *dbtyp
 
 	var numUnconfirmed int64
 
+	// A transaction appears once per address row, so a transaction with several
+	// inputs or outputs for this address appears several times. Look up each
+	// distinct transaction only once.
+	dbTxns := make(map[dbtypes.ChainHash]*dbtypes.Tx, len(addrInfo.Transactions))
+
 	for i, txn := range addrInfo.Transactions {
 		hashStr := txn.TxID.String()
-		// Retrieve the most valid, most mainchain, and most recent tx with this
-		// hash. This means it prefers mainchain and valid blocks first.
-		dbTx, err := pgb.DbTxByHash(ctx, hashStr) // only need: Size, Sent, BlockTime, BlockHeight, VinDbIds
-		if err != nil {
-			return err
+		dbTx, found := dbTxns[txn.TxID]
+		if !found {
+			// Retrieve the most valid, most mainchain, and most recent tx with
+			// this hash. This means it prefers mainchain and valid blocks first.
+			var err error
+			dbTx, err = pgb.DbTxByHash(ctx, hashStr) // only need: Size, Sent, BlockTime, BlockHeight, VinDbIds
+			if err != nil {
+				return err
+			}
+			dbTxns[txn.TxID] = dbTx
 		}
 		txn.Size = dbTx.Size
 		txn.FormattedSize = humanize.Bytes(uint64(dbTx.Size))
@@ -3336,11 +3347,20 @@ func (pgb *ChainDB) VoutsForTx(ctx context.Context, dbTx *dbtypes.Tx) ([]dbtypes
 	return vouts, pgb.replaceCancelError(err)
 }
 
+// TipToSideChain walks back from the current best block to the block with
+// hash mainRoot, flagging each block and its transactions, vins, addresses,
+// votes, tickets and treasury entries as side chain, and moving the best block
+// back as it goes. On success the returned tipHashStr equals mainRoot. If any
+// update fails, the walk stops at that block, the error is logged, and an empty
+// tipHashStr is returned, which never equals mainRoot. Continuing past a failed
+// update would leave the tables disagreeing about the main chain, and a failed
+// block update leaves no previous block hash to continue the walk from.
 func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMoved int64) {
 	tipHash := dbtypes.ChainHash(*pgb.BestBlockHash())
 	tipHashStr = tipHash.String()
 	addresses := make(map[string]struct{})
 	var txnsUpdated, vinsUpdated, votesUpdated, ticketsUpdated, treasuryTxnsUpdates, addrsUpdated int64
+	var walkErr error
 	for tipHashStr != mainRoot {
 		log.Infof("TipToSideChain: tipHashStr = %v, mainRoot = %v", tipHashStr, mainRoot)
 		// 1. Block. Set is_mainchain=false on the tip block, return hash of
@@ -3348,8 +3368,9 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		now := time.Now()
 		previousHash, err := setMainchainByBlockHash(pgb.db, tipHash, false)
 		if err != nil {
-			log.Errorf("Failed to set block %s as a sidechain block: %v",
+			walkErr = fmt.Errorf("failed to set block %s as a sidechain block: %w",
 				tipHash, err)
+			break
 		}
 		blocksMoved++
 		log.Debugf("SetMainchainByBlockHash: %v / tip = %v , prev = %v", time.Since(now), tipHash, previousHash)
@@ -3359,8 +3380,9 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		now = time.Now()
 		rowsUpdated, _, err := updateTransactionsMainchain(pgb.db, tipHash, false)
 		if err != nil {
-			log.Errorf("Failed to set transactions in block %s as sidechain: %v",
+			walkErr = fmt.Errorf("failed to set transactions in block %s as sidechain: %w",
 				tipHash, err)
+			break
 		}
 		txnsUpdated += rowsUpdated
 		log.Debugf("UpdateTransactionsMainchain: %v", time.Since(now))
@@ -3369,7 +3391,8 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		// reference them in vouts.spend_tx_row_id, and unset spend_tx_row_id.
 		voutsUnset, err := clearVoutAllSpendTxRowIDs(pgb.db, tipHash)
 		if err != nil {
-			log.Errorf("clearVoutAllSpendTxRowIDs for block %s: %v", tipHash, err)
+			walkErr = fmt.Errorf("clearVoutAllSpendTxRowIDs for block %s: %w", tipHash, err)
+			break
 		}
 		log.Debugf("Unset spend_tx_row_id for %d vouts previously spent by "+
 			"transactions in orphaned block %s", voutsUnset, tipHash)
@@ -3379,8 +3402,9 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		now = time.Now()
 		rowsUpdated, vinDbIDsBlk, voutDbIDsBlk, err := pgb.setVinsMainchainByBlock(tipHash) // isMainchain from transactions table
 		if err != nil {
-			log.Errorf("Failed to set vins in block %s as sidechain: %v",
+			walkErr = fmt.Errorf("failed to set vins in block %s as sidechain: %w",
 				tipHash, err)
+			break
 		}
 		vinsUpdated += rowsUpdated
 		log.Debugf("SetVinsMainchainByBlock: %v", time.Since(now))
@@ -3392,22 +3416,25 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		now = time.Now()
 		addrs, numAddrSpending, numAddrFunding, err := updateAddressesMainchainByIDs(pgb.db,
 			vinDbIDsBlk, voutDbIDsBlk, false)
-		if err != nil {
-			log.Errorf("Failed to set addresses rows in block %s as sidechain: %v",
-				tipHash, err)
-		}
-		addrsUpdated += numAddrSpending + numAddrFunding
-		log.Debugf("UpdateAddressesMainchainByIDs: %v", time.Since(now))
+		// Clear the cache entries for any addresses reported, even on error.
 		for _, addr := range addrs {
 			addresses[addr] = struct{}{}
 		}
+		if err != nil {
+			walkErr = fmt.Errorf("failed to set addresses rows in block %s as sidechain: %w",
+				tipHash, err)
+			break
+		}
+		addrsUpdated += numAddrSpending + numAddrFunding
+		log.Debugf("UpdateAddressesMainchainByIDs: %v", time.Since(now))
 
 		// 6. Votes. Sets is_mainchain=false on all votes in the tip block.
 		now = time.Now()
 		rowsUpdated, err = updateVotesMainchain(pgb.db, tipHash, false)
 		if err != nil {
-			log.Errorf("Failed to set votes in block %s as sidechain: %v",
+			walkErr = fmt.Errorf("failed to set votes in block %s as sidechain: %w",
 				tipHash, err)
+			break
 		}
 		votesUpdated += rowsUpdated
 		log.Debugf("UpdateVotesMainchain: %v", time.Since(now))
@@ -3416,8 +3443,9 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		now = time.Now()
 		rowsUpdated, err = updateTicketsMainchain(pgb.db, tipHash, false)
 		if err != nil {
-			log.Errorf("Failed to set tickets in block %s as sidechain: %v",
+			walkErr = fmt.Errorf("failed to set tickets in block %s as sidechain: %w",
 				tipHash, err)
+			break
 		}
 		ticketsUpdated += rowsUpdated
 		log.Debugf("UpdateTicketsMainchain: %v", time.Since(now))
@@ -3426,21 +3454,25 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 		now = time.Now()
 		rowsUpdated, err = updateTreasuryMainchain(pgb.db, tipHash, false)
 		if err != nil {
-			log.Errorf("Failed to set tickets in block %s as sidechain: %v",
+			walkErr = fmt.Errorf("failed to set treasury txns in block %s as sidechain: %w",
 				tipHash, err)
+			break
 		}
 		treasuryTxnsUpdates += rowsUpdated
 		log.Debugf("UpdateTreasuryMainchain: %v", time.Since(now))
 
 		// move on to next block
+		height, err := pgb.blockHeight(pgb.ctx, previousHash)
+		if err != nil {
+			walkErr = fmt.Errorf("failed to retrieve block height for %s: %w",
+				previousHash, err)
+			break
+		}
 		tipHash = previousHash
 		tipHashStr = tipHash.String()
 
 		pgb.bestBlock.mtx.Lock()
-		pgb.bestBlock.height, err = pgb.blockHeight(pgb.ctx, tipHash)
-		if err != nil {
-			log.Errorf("Failed to retrieve block height for %s", tipHash)
-		}
+		pgb.bestBlock.height = height
 		pgb.bestBlock.hash = tipHash
 		pgb.bestBlock.mtx.Unlock()
 	}
@@ -3457,6 +3489,12 @@ func (pgb *ChainDB) TipToSideChain(mainRoot string) (tipHashStr string, blocksMo
 	log.Debugf("Reorg orphaned: %d blocks, %d txns, %d vins, %d addresses, %d votes, %d tickets, %d treasury txns",
 		blocksMoved, txnsUpdated, vinsUpdated, addrsUpdated, votesUpdated, ticketsUpdated, treasuryTxnsUpdates)
 
+	if walkErr != nil {
+		log.Errorf("TipToSideChain: %v. Stopped with best block %v.", walkErr,
+			pgb.BestBlockHashStr())
+		return "", blocksMoved
+	}
+
 	return
 }
 
@@ -3467,6 +3505,13 @@ func (pgb *ChainDB) StoreBlock(msgBlock *wire.MsgBlock, isValid, isMainchain,
 	chainWork string) (numVins int64, numVouts int64, numAddresses int64, err error) {
 
 	blockHash := msgBlock.BlockHash()
+
+	// Every valid block has a coinbase as its first regular transaction, which
+	// storeBlockTxnTree relies on. Reject a malformed block before any writes.
+	if len(msgBlock.Transactions) == 0 {
+		err = fmt.Errorf("block %s has no regular transactions", blockHash)
+		return
+	}
 
 	// winningTickets is only set during initial chain sync.
 	// Retrieve it from the stakeDB.
@@ -4661,7 +4706,7 @@ func (pgb *ChainDB) GetStakeInfoExtendedByHash(ctx context.Context, hashStr stri
 		Height:  height,
 		Size:    uint32(size),
 		Value:   coin,
-		ValAvg:  coin / float64(size),
+		ValAvg:  poolValAvg(coin, uint32(size)),
 		Winners: winnersStr,
 	}
 
@@ -5277,8 +5322,7 @@ func (pgb *ChainDB) GetSummaryByHash(ctx context.Context, hash string, withTxTot
 				return nil
 			}
 			// Do not compute fee for coinbase transaction.
-			prev := rawTx.Vin[0].Txid
-			if i == 0 && prev == "" || txhelpers.IsZeroHashStr(prev) {
+			if len(rawTx.Vin) == 0 || !rawTx.Vin[0].IsCoinBase() {
 				fee, _ := txhelpers.TxFeeRate(msgTx)
 				totalFees += fee
 			}
@@ -6177,6 +6221,31 @@ func (pgb *ChainDB) txWithTicketPrice(ctx context.Context, txhash *chainhash.Has
 	return txraw, ticketPrice, nil
 }
 
+// rawTxMemo is a txhelpers.RawTransactionGetter that remembers each
+// transaction it successfully retrieves. It is meant for the life of a single
+// request, and is not safe for concurrent use.
+type rawTxMemo struct {
+	c   txhelpers.RawTransactionGetter
+	txs map[chainhash.Hash]*dcrutil.Tx
+}
+
+// GetRawTransaction returns the remembered transaction with the given hash, or
+// retrieves and remembers it.
+func (m *rawTxMemo) GetRawTransaction(ctx context.Context, txHash *chainhash.Hash) (*dcrutil.Tx, error) {
+	if tx, ok := m.txs[*txHash]; ok {
+		return tx, nil
+	}
+	tx, err := m.c.GetRawTransaction(ctx, txHash)
+	if err != nil {
+		return nil, err
+	}
+	if m.txs == nil {
+		m.txs = make(map[chainhash.Hash]*dcrutil.Tx)
+	}
+	m.txs[*txHash] = tx
+	return tx, nil
+}
+
 // GetExplorerTx creates a *exptypes.TxInfo for the transaction with the given
 // ID.
 func (pgb *ChainDB) GetExplorerTx(ctx context.Context, txid string) *exptypes.TxInfo {
@@ -6208,6 +6277,12 @@ func (pgb *ChainDB) GetExplorerTx(ctx context.Context, txid string) *exptypes.Tx
 		Time:          exptypes.NewTimeDefFromUNIX(txraw.Time),
 	}
 
+	// Several inputs commonly spend outputs of the same previous transaction,
+	// so fetch each previous transaction (and its height, for mempool
+	// transactions) only once.
+	prevTxns := &rawTxMemo{c: pgb.Client}
+	prevTxHeights := make(map[chainhash.Hash]uint32)
+
 	inputs := make([]exptypes.Vin, 0, len(txraw.Vin))
 	for i := range txraw.Vin {
 		vin := &txraw.Vin[i]
@@ -6225,7 +6300,7 @@ func (pgb *ChainDB) GetExplorerTx(ctx context.Context, txid string) *exptypes.Tx
 			valueIn0 := valueIn
 
 			addresses, valueIn, err = txhelpers.OutPointAddresses(
-				prevOut, pgb.Client, pgb.chainParams)
+				prevOut, prevTxns, pgb.chainParams)
 			if err != nil {
 				log.Warnf("Failed to get outpoint address from txid: %v", err)
 				continue
@@ -6246,12 +6321,15 @@ func (pgb *ChainDB) GetExplorerTx(ctx context.Context, txid string) *exptypes.Tx
 			vinHash, err := chainhash.NewHashFromStr(vin.Txid)
 			if err != nil {
 				log.Errorf("Failed to translate hash from string: %s", vin.Txid)
+			} else if height, ok := prevTxHeights[*vinHash]; ok {
+				vin.BlockHeight = height
 			} else {
 				// Alt. DB-powered height lookup:
 				// vin.BlockHeight = uint32(pgb.TxHeight(vinHash))
 				prevTx, err := pgb.Client.GetRawTransactionVerbose(ctx, vinHash)
 				if err == nil {
 					vin.BlockHeight = uint32(prevTx.BlockHeight)
+					prevTxHeights[*vinHash] = vin.BlockHeight
 				} else {
 					log.Errorf("Error getting data for previous outpoint of mempool transaction: %v", err)
 				}
@@ -6295,11 +6373,16 @@ func (pgb *ChainDB) GetExplorerTx(ctx context.Context, txid string) *exptypes.Tx
 		}
 		tx.Maturity = int64(pgb.chainParams.CoinbaseMaturity)
 
+		// Without a vote tally there is no treasury spend metadata to compute,
+		// so leave TSpendMeta nil and still show the transaction.
+		var tSpendTally *dbtypes.TreasurySpendVotes
 		if tx.IsTreasurySpend() {
-			tSpendTally, err := pgb.TSpendVotes(ctx, txhash)
+			tSpendTally, err = pgb.TSpendVotes(ctx, txhash)
 			if err != nil {
 				log.Errorf("Failed to retrieve vote tally for tspend %v: %v", txid, err)
 			}
+		}
+		if tSpendTally != nil {
 			tx.TSpendMeta = new(dbtypes.TreasurySpendMetaData)
 			tx.TSpendMeta.TreasurySpendVotes = tSpendTally
 
@@ -6563,10 +6646,14 @@ func (pgb *ChainDB) GetExplorerFullBlocks(ctx context.Context, start int, end in
 	}
 	summaries := make([]*exptypes.BlockInfo, 0, start-end)
 	for i := start; i > end; i-- {
-		data := pgb.getBlockVerbose(ctx, i, true)
+		// Only the hash is needed here. GetExplorerBlock fetches the verbose
+		// block itself.
 		block := new(exptypes.BlockInfo)
-		if data != nil {
-			block = pgb.GetExplorerBlock(ctx, data.Hash)
+		hash, err := pgb.Client.GetBlockHash(ctx, int64(i))
+		if err != nil {
+			log.Errorf("GetBlockHash(%d) failed: %v", i, err)
+		} else {
+			block = pgb.GetExplorerBlock(ctx, hash.String())
 		}
 		summaries = append(summaries, block)
 	}

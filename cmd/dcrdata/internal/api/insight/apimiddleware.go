@@ -151,6 +151,50 @@ func (iapi *InsightApi) ValidatePostCtx(next http.Handler) http.Handler {
 // 	return uniqStrs
 // }
 
+// readJSONBody reads the request body and unmarshals the JSON into req. If
+// this fails, an Insight error response is written and false is returned.
+func readJSONBody(w http.ResponseWriter, r *http.Request, req any) bool {
+	body, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		errStr := html.EscapeString(err.Error())
+		writeInsightError(w, fmt.Sprintf("error reading JSON message: %q", errStr))
+		return false
+	}
+	if err = json.Unmarshal(body, req); err != nil {
+		errStr := html.EscapeString(err.Error())
+		writeInsightError(w, fmt.Sprintf("Failed to parse request: %q", errStr))
+		return false
+	}
+	return true
+}
+
+// splitPostAddrs splits the comma-separated address list from a POST body,
+// allowing at most n addresses. If the list is invalid, an error response is
+// written and false is returned. Dups are removed later in GetAddressCtx.
+func splitPostAddrs(w http.ResponseWriter, addressStr string, n int, caller string) ([]string, bool) {
+	// Initial sanity check without splitting string: It can't be longer than
+	// n addresses, plus n - 1 commas.
+	const minAddressLength = 35 // p2pkh and p2sh
+	if len(addressStr) < minAddressLength {
+		http.Error(w, "invalid address", http.StatusBadRequest)
+		return nil, false
+	}
+	const maxAddressLength = 53 // p2pk
+	if len(addressStr) > n*(maxAddressLength+1)-1 {
+		apiLog.Warnf("%s rejecting address parameter of length %d", caller, len(addressStr))
+		http.Error(w, "too many address", http.StatusBadRequest)
+		return nil, false
+	}
+	addrs := strings.Split(addressStr, ",")
+	if len(addrs) > n {
+		apiLog.Warnf("%s parsed %d > %d strings", caller, len(addrs), n)
+		http.Error(w, "address parse error", http.StatusBadRequest)
+		return nil, false
+	}
+	return addrs, true
+}
+
 // PostAddrsTxsCtxN middleware processes parameters given in the POST request
 // body for an addrs endpoint, limiting to N addresses. While the addresses
 // list, "addrs", must be in the POST body JSON, the other parameters may be
@@ -158,48 +202,18 @@ func (iapi *InsightApi) ValidatePostCtx(next http.Handler) http.Handler {
 func PostAddrsTxsCtxN(n int) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body, err := io.ReadAll(r.Body)
-			r.Body.Close()
-			if err != nil {
-				errStr := html.EscapeString(err.Error())
-				writeInsightError(w, fmt.Sprintf("error reading JSON message: %q", errStr))
-				return
-			}
-
 			// The request body must be JSON.
 			var req apitypes.InsightMultiAddrsTx
-			err = json.Unmarshal(body, &req)
-			if err != nil {
-				errStr := html.EscapeString(err.Error())
-				writeInsightError(w, fmt.Sprintf("Failed to parse request: %q", errStr))
+			if !readJSONBody(w, r, &req) {
 				return
 			}
 
 			// addrs must come from POST body.
-			addressStr := req.Addresses
-
-			// Initial sanity check without splitting string: It can't be longer
-			// than n addresses, plus n - 1 commas.
-			const minAddressLength = 35 // p2pk and p2sh
-			if len(addressStr) < minAddressLength {
-				http.Error(w, "invalid address", http.StatusBadRequest)
-				return
-			}
-			const maxAddressLength = 53 // p2pk
-			if len(addressStr) > n*(maxAddressLength+1)-1 {
-				apiLog.Warnf("PostAddrsTxsCtxN rejecting address parameter of length %d", len(addressStr))
-				http.Error(w, "too many address", http.StatusBadRequest)
-				return
-			}
-			addrs := strings.Split(addressStr, ",")
-			if len(addrs) > n {
-				apiLog.Warnf("AddressPathCtxN parsed %d > %d strings", len(addrs), n)
-				http.Error(w, "address parse error", http.StatusBadRequest)
+			addrs, ok := splitPostAddrs(w, req.Addresses, n, "PostAddrsTxsCtxN")
+			if !ok {
 				return
 			}
 
-			// Dups are removed in GetAddressCtx.
-			// addrs = uniqueStrs(addrs)
 			ctx := context.WithValue(r.Context(), m.CtxAddress, addrs)
 
 			// Other parameters may come from the POST body or URL query values.
@@ -264,47 +278,17 @@ func PostAddrsTxsCtxN(n int) func(next http.Handler) http.Handler {
 func PostAddrsUtxoCtxN(n int) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			req := apitypes.InsightAddr{}
-			body, err := io.ReadAll(r.Body)
-			r.Body.Close()
-			if err != nil {
-				errStr := html.EscapeString(err.Error())
-				writeInsightError(w, fmt.Sprintf("error reading JSON message: %q", errStr))
-				return
-			}
-
-			err = json.Unmarshal(body, &req)
-			if err != nil {
-				errStr := html.EscapeString(err.Error())
-				writeInsightError(w, fmt.Sprintf("Failed to parse request: %q", errStr))
+			var req apitypes.InsightAddr
+			if !readJSONBody(w, r, &req) {
 				return
 			}
 
 			// addrs must come from POST body.
-			addressStr := req.Addrs
-
-			// Initial sanity check without splitting string: It can't be longer
-			// than n addresses, plus n - 1 commas.
-			const minAddressLength = 35 // p2pk and p2sh
-			if len(addressStr) < minAddressLength {
-				http.Error(w, "invalid address", http.StatusBadRequest)
-				return
-			}
-			const maxAddressLength = 53 // p2pk
-			if len(addressStr) > n*(maxAddressLength+1)-1 {
-				apiLog.Warnf("PostAddrsTxsCtxN rejecting address parameter of length %d", len(addressStr))
-				http.Error(w, "too many address", http.StatusBadRequest)
-				return
-			}
-			addrs := strings.Split(addressStr, ",")
-			if len(addrs) > n {
-				apiLog.Warnf("AddressPathCtxN parsed %d > %d strings", len(addrs), n)
-				http.Error(w, "address parse error", http.StatusBadRequest)
+			addrs, ok := splitPostAddrs(w, req.Addrs, n, "PostAddrsUtxoCtxN")
+			if !ok {
 				return
 			}
 
-			// Dups are removed in GetAddressCtx.
-			// addrs = uniqueStrs(addrs)
 			ctx := context.WithValue(r.Context(), m.CtxAddress, addrs)
 
 			next.ServeHTTP(w, r.WithContext(ctx))

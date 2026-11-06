@@ -76,6 +76,8 @@ type connection struct {
 	sync.WaitGroup
 	ws     *websocket.Conn
 	client *clientHubSpoke
+	// recvDone is closed when receiveLoop returns, which stops sendLoop.
+	recvDone chan struct{}
 }
 
 // PubSubHub manages the collection and distribution of block chain and mempool
@@ -180,12 +182,14 @@ func closeWS(ws *websocket.Conn) {
 // receiveLoop receives and processes incoming messages from active websocket
 // connections. receiveLoop should be started as a goroutine, after conn.Add(1)
 // and before a conn.Wait(). receiveLoop returns when the websocket connection,
-// conn.ws, is closed, which should be initiated when sendLoop returns.
+// conn.ws, is closed, either by the client or when sendLoop returns. On return,
+// conn.recvDone is closed so that sendLoop also returns.
 func (psh *PubSubHub) receiveLoop(ctx context.Context, conn *connection) {
 	//defer conn.client.cl.unsubscribeAll()
 
 	// receiveLoop should be started after conn.Add(1) and before a conn.Wait().
 	defer conn.Done()
+	defer close(conn.recvDone)
 
 	// Receive messages on the websocket.Conn until it is closed.
 	ws := conn.ws
@@ -384,8 +388,9 @@ func (psh *PubSubHub) receiveLoop(ctx context.Context, conn *connection) {
 
 // sendLoop receives signals from WebSocketHub via the connections unique signal
 // channel, and sends the relevant data to the client. sendLoop will return when
-// conn.client.c is closed. On return, the websocket connection, conn.ws, will
-// be closed, thus forcing the same connection's receiveLoop to return.
+// conn.client.c is closed or when receiveLoop returns. On return, the websocket
+// connection, conn.ws, will be closed, thus forcing the same connection's
+// receiveLoop to return.
 func (psh *PubSubHub) sendLoop(conn *connection) {
 	// Use this client's unique channel to receive signals from the
 	// WebSocketHub, which broadcasts signals to all clients.
@@ -403,10 +408,22 @@ func (psh *PubSubHub) sendLoop(conn *connection) {
 	defer closeWS(ws)
 
 loop:
-	for sig := range updateSigChan {
+	for {
+		var sig pstypes.HubMessage
+		select {
+		case s, ok := <-updateSigChan:
+			// If the update channel is closed, the loop terminates.
+			if !ok {
+				return
+			}
+			sig = s
+		case <-conn.recvDone:
+			// The connection was closed or receiving from it failed. Do not
+			// wait for the next hub signal to discover this.
+			return
+		}
 		log.Tracef("(*PubSubHub)sendLoop: updateSigChan received %v for client %d",
 			sig, clientData.id)
-		// If the update channel is closed, the loop terminates.
 
 		if !sig.IsValid() {
 			log.Errorf("invalid signal to send: %s / %d", sig.Signal, int(sig.Signal))
@@ -540,7 +557,7 @@ loop:
 			log.Errorf("websocket.JSON.Send of %v type message failed: %v", sig, err)
 			return
 		}
-	} // for range { a.k.a. loop:
+	} // for { a.k.a. loop:
 }
 
 // WebSocketHandler is the http.HandlerFunc for new websocket connections. The
@@ -549,7 +566,14 @@ loop:
 func (psh *PubSubHub) WebSocketHandler(w http.ResponseWriter, r *http.Request) {
 	// Register websocket client.
 	ch := psh.wsHub.NewClientHubSpoke()
-	defer close(ch.cl.killed)
+	defer func() {
+		// Close killed first, so the hub's run loop does not wait on this
+		// goroutine if it is presently unregistering this client itself.
+		close(ch.cl.killed)
+		// Unregister the client now rather than when the hub next attempts to
+		// signal it.
+		psh.wsHub.unregisterGoneClient(ch)
+	}()
 
 	wsHandler := websocket.Handler(func(ws *websocket.Conn) {
 		// Set the max payload size for this connection.
@@ -558,15 +582,18 @@ func (psh *PubSubHub) WebSocketHandler(w http.ResponseWriter, r *http.Request) {
 		// The receive loop will be sitting on websocket.JSON.Receive, while the
 		// send loop will be waiting for signals from the WebSocketHub. One must
 		// close the other depending on whether the connection was closed/lost,
-		// or the WebSocketHub quit or forcibly unregistered the client. The
-		// receive loop unregisters the client (thus closing the update signal
-		// channel) when the connection is closed and it returns. The send loop
-		// closes the websocket.Conn on return, which will interrupt the receive
-		// loop from its waiting to receive data on the connection.
+		// or the WebSocketHub quit or forcibly unregistered the client. When
+		// the connection is closed, the receive loop returns and closes
+		// recvDone, which stops the send loop. The send loop closes the
+		// websocket.Conn on return, which will interrupt the receive loop from
+		// its waiting to receive data on the connection. Once both have
+		// returned, the client is unregistered from the hub (thus closing the
+		// update signal channel) as this handler returns.
 
 		conn := &connection{
-			client: ch,
-			ws:     ws,
+			client:   ch,
+			ws:       ws,
+			recvDone: make(chan struct{}),
 		}
 
 		// Start listening for websocket messages from client, returning when
@@ -615,6 +642,10 @@ func (psh *PubSubHub) Store(blockData *blockdata.BlockData, msgBlock *wire.MsgBl
 
 	// Retrieve block data for the passed block hash.
 	newBlockData := psh.sourceBase.GetExplorerBlock(ctx, msgBlock.BlockHash().String())
+	if newBlockData == nil {
+		return fmt.Errorf("unable to get explorer block data for block %v",
+			msgBlock.BlockHash())
+	}
 
 	// Use the latest block's blocktime to get the last 24hr timestamp.
 	day := 24 * time.Hour

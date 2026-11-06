@@ -18,14 +18,49 @@ type StreamID uint
 
 var streamCounter StreamID
 
+// clientQueueSize is the number of updates that may be waiting to be sent to a
+// client. A client that falls this far behind is disconnected, and receives the
+// full state again when it reconnects.
+const clientQueueSize = 64
+
 // RateServer manages the data sources and client subscriptions.
 type RateServer struct {
 	index      string
 	xcBot      *exchanges.ExchangeBot
 	clientLock *sync.RWMutex
-	clients    map[StreamID]RateClient
+	clients    map[StreamID]*subscriber
 
 	dcrrates.UnimplementedDCRRatesServer
+}
+
+// subscriber pairs a RateClient with the queue of updates waiting to be sent
+// to it. Updates are only sent from the client's own subscription goroutine,
+// so a client that stops reading cannot stall the delivery of updates to the
+// other clients, and its stream is never written from two goroutines at once.
+type subscriber struct {
+	RateClient
+	queue    chan *dcrrates.ExchangeRateUpdate
+	overflow chan struct{}
+	once     sync.Once
+}
+
+func newSubscriber(client RateClient) *subscriber {
+	return &subscriber{
+		RateClient: client,
+		queue:      make(chan *dcrrates.ExchangeRateUpdate, clientQueueSize),
+		overflow:   make(chan struct{}),
+	}
+}
+
+// enqueue queues the update for sending without blocking. If the queue is
+// full, the overflow channel is closed to signal that the client should be
+// disconnected.
+func (sub *subscriber) enqueue(update *dcrrates.ExchangeRateUpdate) {
+	select {
+	case sub.queue <- update:
+	default:
+		sub.once.Do(func() { close(sub.overflow) })
+	}
 }
 
 // RateClient is an interface for rateClient to enable testing the server via
@@ -40,7 +75,7 @@ func NewRateServer(index string, xcBot *exchanges.ExchangeBot) *RateServer {
 	return &RateServer{
 		index:      index,
 		clientLock: new(sync.RWMutex),
-		clients:    make(map[StreamID]RateClient),
+		clients:    make(map[StreamID]*subscriber),
 		xcBot:      xcBot,
 	}
 }
@@ -78,8 +113,9 @@ func (server *RateServer) SubscribeExchanges(hello *dcrrates.ExchangeSubscriptio
 }
 
 // ReallySubscribeExchanges stores the client and their exchange subscriptions.
-// It waits for the client contexts Done channel to close and deletes the client
-// from the RateServer.clients map.
+// It sends the current state, then sends queued updates until the client
+// contexts Done channel closes or the client falls too far behind, and deletes
+// the client from the RateServer.clients map on return.
 func (server *RateServer) ReallySubscribeExchanges(hello *dcrrates.ExchangeSubscription, stream GRPCStream) (err error) {
 	// For now, require the ExchangeBot clients to have the same base currency.
 	// ToDo: Allow any index.
@@ -88,6 +124,7 @@ func (server *RateServer) ReallySubscribeExchanges(hello *dcrrates.ExchangeSubsc
 	}
 	// Save the client for use in the main loop.
 	client, sid := server.addClient(stream, hello)
+	defer server.deleteClient(sid)
 
 	// Get the address for an Infof. Seems like peerInfo is always found, but
 	// am checking anyway.
@@ -124,22 +161,51 @@ func (server *RateServer) ReallySubscribeExchanges(hello *dcrrates.ExchangeSubsc
 		}
 	}
 
-	// Keep stream alive.
-	<-client.Stream().Context().Done()
-
-	server.deleteClient(sid)
-	log.Infof("Client at %s has disconnected", clientAddr)
-	return
+	// Keep stream alive, sending updates as they are queued by the main loop.
+	done := client.Stream().Context().Done()
+	for {
+		select {
+		case update := <-client.queue:
+			err = client.SendExchangeUpdate(update)
+			if err != nil {
+				log.Errorf("Error sending update to client at %s: %v", clientAddr, err)
+				return err
+			}
+		case <-client.overflow:
+			log.Warnf("Disconnecting client at %s, which is not keeping up with updates", clientAddr)
+			return fmt.Errorf("client is not keeping up with updates")
+		case <-done:
+			log.Infof("Client at %s has disconnected", clientAddr)
+			return nil
+		}
+	}
 }
 
 // addClient adds a client to the map and advance the streamCounter.
-func (server *RateServer) addClient(stream GRPCStream, hello *dcrrates.ExchangeSubscription) (RateClient, StreamID) {
+func (server *RateServer) addClient(stream GRPCStream, hello *dcrrates.ExchangeSubscription) (*subscriber, StreamID) {
 	server.clientLock.Lock()
 	defer server.clientLock.Unlock()
-	client := NewRateClient(stream, hello.GetExchanges())
+	client := newSubscriber(NewRateClient(stream, hello.GetExchanges()))
 	streamCounter++
 	server.clients[streamCounter] = client
 	return client, streamCounter
+}
+
+// hasClients is whether any clients are subscribed.
+func (server *RateServer) hasClients() bool {
+	server.clientLock.RLock()
+	defer server.clientLock.RUnlock()
+	return len(server.clients) > 0
+}
+
+// sendUpdate queues the update for every client. It does not block on any
+// client's stream.
+func (server *RateServer) sendUpdate(update *dcrrates.ExchangeRateUpdate) {
+	server.clientLock.RLock()
+	defer server.clientLock.RUnlock()
+	for _, client := range server.clients {
+		client.enqueue(update)
+	}
 }
 
 // deleteClient deletes the client from the map.

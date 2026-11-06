@@ -525,3 +525,25 @@ func BenchmarkMsgTxFromHex(b *testing.B) {
 		}
 	}
 }
+
+func TestFormatLockTime(t *testing.T) {
+	tests := []struct {
+		lockTime int64
+		want     string
+	}{
+		{0, "block 0"},
+		{1000, "block 1000"},
+		{499999999, "block 499999999"},
+		{500000000, "1985-11-05 00:53:20 (UTC)"},
+		{1700000000, "2023-11-14 22:13:20 (UTC)"},
+	}
+	for _, tt := range tests {
+		if got := formatLockTime(tt.lockTime); got != tt.want {
+			t.Errorf("formatLockTime(%d) = %q, want %q", tt.lockTime, got, tt.want)
+		}
+	}
+	asd := &AtomicSwapData{Locktime: 1000}
+	if got := asd.ToAPI().FormattedLocktime; got != "block 1000" {
+		t.Errorf("ToAPI FormattedLocktime = %q, want %q", got, "block 1000")
+	}
+}

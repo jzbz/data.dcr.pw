@@ -140,7 +140,8 @@ func (p *ChainMonitor) switchToSideChain(reorgData *txhelpers.ReorgData) (int32,
 // corresponding reorganization of the ChainDB. ReorgHandler satisfies
 // notification.ReorgHandler, and is registered as a handler in main.go.
 func (p *ChainMonitor) ReorgHandler(reorg *txhelpers.ReorgData) error {
-	p.db.InReorg = true // to avoid project fund balance computation
+	p.db.InReorg.Store(true) // to avoid project fund balance computation
+	defer p.db.InReorg.Store(false)
 	newHeight, oldHeight := reorg.NewChainHeight, reorg.OldChainHeight
 	newHash, oldHash := reorg.NewChainHead, reorg.OldChainHead
 
@@ -158,10 +159,8 @@ func (p *ChainMonitor) ReorgHandler(reorg *txhelpers.ReorgData) error {
 		return fmt.Errorf("stakeDBTipHeight is %d, expected %d", stakeDBTipHeight, newHeight)
 	}
 	if *stakeDBTipHash != newHash {
-		return fmt.Errorf("stakeDBTipHash is %d, expected %d", stakeDBTipHash, newHash)
+		return fmt.Errorf("stakeDBTipHash is %v, expected %v", stakeDBTipHash, newHash)
 	}
-
-	p.db.InReorg = false
 
 	// Update project fund in cache, but clear NO address cache data since
 	// switchToSideChain maintains the cache via TipToSideChain and StoreBlock.

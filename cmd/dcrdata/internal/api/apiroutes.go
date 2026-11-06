@@ -904,7 +904,7 @@ func (c *appContext) getDecodedTransactions(w http.ResponseWriter, r *http.Reque
 	for i := range txids {
 		tx := c.DataSource.GetTrimmedTransaction(ctx, txids[i])
 		if tx == nil {
-			apiLog.Errorf("Unable to get transaction %v", tx)
+			apiLog.Errorf("Unable to get transaction %v", txids[i])
 			http.Error(w, http.StatusText(422), 422)
 			return
 		}
@@ -1533,13 +1533,15 @@ func (c *appContext) getTicketPoolInfo(w http.ResponseWriter, r *http.Request) {
 
 func (c *appContext) getTicketPoolInfoRange(w http.ResponseWriter, r *http.Request) {
 	if useArray := r.URL.Query().Get("arrays"); useArray != "" {
-		_, err := strconv.ParseBool(useArray)
+		arrays, err := strconv.ParseBool(useArray)
 		if err != nil {
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
-		c.getTicketPoolValAndSizeRange(w, r)
-		return
+		if arrays {
+			c.getTicketPoolValAndSizeRange(w, r)
+			return
+		}
 	}
 	ctx := r.Context()
 
@@ -1552,6 +1554,14 @@ func (c *appContext) getTicketPoolInfoRange(w http.ResponseWriter, r *http.Reque
 	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 {
 		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	// Each TicketPoolInfo carries the block's winning tickets, so the object
+	// form is limited like the block summary ranges. The compact arrays=true
+	// form has no such limit.
+	if idx >= idx0 && idx-idx0+1 > maxBlockRangeCount {
+		http.Error(w, fmt.Sprintf("requested more than %d-block maximum", maxBlockRangeCount), http.StatusBadRequest)
 		return
 	}
 
@@ -1667,18 +1677,34 @@ func (c *appContext) addressExists(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Warnf("existsaddress error: %v", err)
 		http.Error(w, http.StatusText(422), 422)
+		return
 	}
-	b, err := hex.DecodeString(strMask)
+	exists, err := existsMaskToBools(strMask, len(addresses))
 	if err != nil {
 		log.Warnf("existsaddress error: %v", err)
 		http.Error(w, http.StatusText(422), 422)
-	}
-	mask := binary.LittleEndian.Uint64(append(b, make([]byte, 8-len(b))...))
-	exists := make([]bool, 0, len(addresses))
-	for n := range addresses {
-		exists = append(exists, (mask&(1<<uint8(n))) != 0)
+		return
 	}
 	writeJSON(w, exists, m.GetIndentCtx(r))
+}
+
+// existsMaskToBools decodes the little-endian hexadecimal bit mask returned by
+// the existsaddresses RPC into one bool per requested address. The mask may be
+// at most 8 bytes, since it must fit in a uint64.
+func existsMaskToBools(strMask string, numAddrs int) ([]bool, error) {
+	b, err := hex.DecodeString(strMask)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 8 {
+		return nil, fmt.Errorf("existsaddresses mask is %d bytes, expected at most 8", len(b))
+	}
+	mask := binary.LittleEndian.Uint64(append(b, make([]byte, 8-len(b))...))
+	exists := make([]bool, 0, numAddrs)
+	for n := range numAddrs {
+		exists = append(exists, (mask&(1<<uint8(n))) != 0)
+	}
+	return exists, nil
 }
 
 func (c *appContext) addressIoCsvNoCR(w http.ResponseWriter, r *http.Request) {
@@ -1740,8 +1766,12 @@ func (c *appContext) addressIoCsv(crlf bool, w http.ResponseWriter, r *http.Requ
 	writer.Flush()
 	wf.Flush()
 
+	// Rows are buffered by the csv.Writer and pushed to the client every
+	// csvFlushRows rows rather than once per row, which would cost a write
+	// syscall for each row of an address with a long history.
+	const csvFlushRows = 1000
 	var strValidMainchain, strDirection string
-	for _, r := range rows {
+	for i, r := range rows {
 		if r.ValidMainChain {
 			strValidMainchain = "1"
 		} else {
@@ -1771,9 +1801,12 @@ func (c *appContext) addressIoCsv(crlf bool, w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			return // too late to write an error code
 		}
-		writer.Flush()
-		wf.Flush()
+		if (i+1)%csvFlushRows == 0 {
+			writer.Flush()
+			wf.Flush()
+		}
 	}
+	writer.Flush()
 }
 
 func (c *appContext) getAddressTxTypesData(w http.ResponseWriter, r *http.Request) {
@@ -2087,6 +2120,15 @@ func downsampleChartJSON(data []byte, maxPoints int) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return data, nil //nolint:nilerr // unparseable input is served as-is, as documented above
+	}
+	// Index-implicit responses are served unchanged, so skip decoding their
+	// (possibly per-block) numeric arrays.
+	isArray := func(k string) bool {
+		raw := obj[k]
+		return len(raw) > 0 && raw[0] == '['
+	}
+	if !isArray("t") && !isArray("h") {
+		return data, nil
 	}
 	arrays := make(map[string][]float64)
 	seriesLen := 0
@@ -2410,6 +2452,7 @@ func (c *appContext) getAgendasData(w http.ResponseWriter, _ *http.Request) {
 	if err != nil {
 		apiLog.Errorf("AllAgendas timeout error: %v", err)
 		http.Error(w, "Database timeout.", http.StatusServiceUnavailable)
+		return
 	}
 
 	data := make([]apitypes.AgendasInfo, 0, len(agendas))

@@ -229,7 +229,7 @@ func (apic *APICache) removeCachedBlock(cachedBlock *CachedBlock) {
 	// remove the block from the expiration queue
 	apic.expireQueue.RemoveBlock(cachedBlock)
 	// remove from block cache
-	if hash, err := chainhash.NewHashFromStr(cachedBlock.hash); err != nil {
+	if hash, err := chainhash.NewHashFromStr(cachedBlock.hash); err == nil {
 		delete(apic.blockCache, *hash)
 	}
 	delete(apic.MainchainBlocks, int64(cachedBlock.height))
@@ -809,7 +809,7 @@ func (pq *BlockPriorityQueue) RemoveBlock(b *CachedBlock) {
 	pq.mtx.Lock()
 	defer pq.mtx.Unlock()
 
-	if b != nil && b.heapIdx > 0 && b.heapIdx < pq.Len() {
+	if b != nil && b.heapIdx >= 0 && b.heapIdx < pq.Len() {
 		// only remove the block it it is really in the queue
 		if pq.bh[b.heapIdx].hash == b.hash {
 			pq.RemoveIndex(b.heapIdx)
@@ -831,6 +831,8 @@ func (pq *BlockPriorityQueue) RemoveIndex(idx int) {
 // RescanMinMax rescans the entire heap to get the current min/max heights. This
 // function is NOT thread-safe.
 func (pq *BlockPriorityQueue) RescanMinMax() {
+	pq.maxHeight = -1
+	pq.minHeight = math.MaxUint32
 	for i := range pq.bh {
 		pq.updateMinMax(pq.bh[i].height)
 	}

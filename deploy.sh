@@ -44,7 +44,7 @@
 #   --dcrduser <user>  Existing dcrd RPC username  (with --skip-dcrd).
 #   --dcrdpass <pass>  Existing dcrd RPC password  (with --skip-dcrd).
 #   --dcrdcert <path>  Existing dcrd rpc.cert file (with --skip-dcrd).
-#   --go-version <v>   Go toolchain version        (default: 1.27.1).
+#   --go-version <v>   Go toolchain version        (default: 1.27.3).
 #   --dcrd-version <v> dcrd module version to go install (default: latest;
 #                      dcrd 2.1.6 is module v1.10.8, or name its tag,
 #                      release-v2.1.6).
@@ -56,13 +56,13 @@ set -euo pipefail
 
 # ---- Configuration --------------------------------------------------------
 
-GO_VERSION="1.27.1"
+GO_VERSION="1.27.3"
 # sha256 of the official go${GO_VERSION} linux tarballs (https://go.dev/dl/).
 # Bump together with GO_VERSION. A --go-version override is checked against
 # the .sha256 file published beside its tarball instead.
 GO_PINNED_VERSION="${GO_VERSION}"
-GO_SHA256_AMD64="63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
-GO_SHA256_ARM64="3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
+GO_SHA256_AMD64="65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+GO_SHA256_ARM64="a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49"
 DCRD_VERSION="latest"
 REPO_URL="https://github.com/jzbz/data.dcr.pw"
 # Where this script is served from, quoted in usage when it was piped to bash
@@ -551,6 +551,8 @@ else
   git clone --depth 1 "$REPO_URL" "$APP_DIR"
   chown -R "$DATA_USER:$DATA_USER" "$DATA_HOME"
 fi
+# Name the exact revision being deployed, so the log records what was built.
+ok "Checked out $(sudo -u "$DATA_USER" git -C "$APP_DIR" log -1 --format='%h %s')"
 
 # Back end: build to a temp file, swapped into place atomically only on success
 # so a broken build never takes down the running service. -buildvcs=false: the
