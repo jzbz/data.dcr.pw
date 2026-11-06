@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/go-chi/chi/v5"
 
@@ -181,5 +182,68 @@ func TestAddressIoCsv(t *testing.T) {
 	// written when the handler returns.
 	if w.flushes != 3 {
 		t.Errorf("flushes = %d, want 3", w.flushes)
+	}
+}
+
+type trimmedTxStub struct {
+	DataSource
+	calls int
+}
+
+func (s *trimmedTxStub) GetTrimmedTransaction(_ context.Context, txid *chainhash.Hash) *apitypes.TrimmedTx {
+	s.calls++
+	return &apitypes.TrimmedTx{TxID: txid.String()}
+}
+
+func TestBatchTxnsConcurrencyLimit(t *testing.T) {
+	ds := &trimmedTxStub{}
+	app := &appContext{DataSource: ds}
+	handler := m.PostTxnsCtx(http.HandlerFunc(app.getDecodedTransactions))
+
+	txids := []string{chainhash.Hash{1}.String(), chainhash.Hash{2}.String()}
+	body, err := json.Marshal(apitypes.Txns{Transactions: txids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(ctx context.Context) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/txs/trimmed",
+			strings.NewReader(string(body))).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// With every slot taken, a request whose context ends gets 503 without
+	// fetching anything.
+	for range maxConcurrentBatchTxns {
+		batchTxnsSem <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := post(ctx)
+	for range maxConcurrentBatchTxns {
+		<-batchTxnsSem
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status with all slots taken = %d, want 503", rec.Code)
+	}
+	if ds.calls != 0 {
+		t.Fatalf("GetTrimmedTransaction called %d times while waiting for a slot", ds.calls)
+	}
+
+	// With a free slot the request proceeds, and releases the slot after.
+	rec = post(context.Background())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	var got []apitypes.TrimmedTx
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(txids) || ds.calls != len(txids) {
+		t.Fatalf("got %d txns with %d calls, want %d", len(got), ds.calls, len(txids))
+	}
+	if n := len(batchTxnsSem); n != 0 {
+		t.Fatalf("%d batch slots still held after the request", n)
 	}
 }

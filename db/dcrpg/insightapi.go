@@ -7,6 +7,7 @@ package dcrpg
 import (
 	"context"
 	"encoding/hex"
+	"sort"
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
@@ -75,23 +76,53 @@ func (pgb *ChainDB) InsightAddressTransactions(ctx context.Context, addr []strin
 		return nil, nil, err0
 	}
 
-	// Retrieve all merged address rows for these addresses. The rows for each
-	// address are concatenated, so with multiple addresses the recent
-	// transactions are not necessarily at the front of txs. Select them by
-	// block time instead.
+	// Retrieve all merged address rows for these addresses.
+	rowsPerAddr := make([][]*dbtypes.AddressRowMerged, 0, len(addr))
 	for i := range addr {
 		rows, err := pgb.AddressRowsMerged(ctx, addr[i])
 		if err != nil {
 			return nil, nil, err
 		}
-		for _, r := range rows {
-			txs = append(txs, chainhash.Hash(r.TxHash))
-			if r.TxBlockTime > recentBlocktime {
-				recentTxs = append(recentTxs, chainhash.Hash(r.TxHash))
-			}
-		}
+		rowsPerAddr = append(rowsPerAddr, rows)
 	}
 
+	txs, recentTxs = mergeAddressTxns(rowsPerAddr, recentBlocktime)
+	return
+}
+
+// mergeAddressTxns combines the merged address rows of one or more addresses
+// into a single list of transaction hashes, newest first, listing a
+// transaction that involves more than one of the addresses only once. Each
+// address's rows are expected newest first; transactions with the same block
+// time keep that order, with earlier addresses first. recentTxs lists the
+// transactions with a block time after recentBlocktime, in the same order.
+func mergeAddressTxns(rowsPerAddr [][]*dbtypes.AddressRowMerged, recentBlocktime int64) (txs, recentTxs []chainhash.Hash) {
+	var merged []*dbtypes.AddressRowMerged
+	if len(rowsPerAddr) == 1 {
+		merged = rowsPerAddr[0]
+	} else {
+		seen := make(map[dbtypes.ChainHash]struct{})
+		for _, rows := range rowsPerAddr {
+			for _, r := range rows {
+				if _, ok := seen[r.TxHash]; ok {
+					continue
+				}
+				seen[r.TxHash] = struct{}{}
+				merged = append(merged, r)
+			}
+		}
+		sort.SliceStable(merged, func(i, j int) bool {
+			return merged[i].TxBlockTime > merged[j].TxBlockTime
+		})
+	}
+
+	txs = make([]chainhash.Hash, 0, len(merged))
+	for _, r := range merged {
+		txs = append(txs, chainhash.Hash(r.TxHash))
+		if r.TxBlockTime > recentBlocktime {
+			recentTxs = append(recentTxs, chainhash.Hash(r.TxHash))
+		}
+	}
 	return
 }
 

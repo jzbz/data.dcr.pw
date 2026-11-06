@@ -844,6 +844,29 @@ func (c *appContext) getTxSwapsInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // getTransactions handles the /txns POST API endpoint.
+// maxConcurrentBatchTxns limits how many POST /txs and /txs/trimmed requests
+// may be fetching their transactions at once. Each request looks up as many as
+// middleware's maxTxnsPerPost transactions one at a time, mostly from dcrd, so
+// the per-client rate limit alone does not bound the load that many concurrent
+// batches put on the node.
+const maxConcurrentBatchTxns = 4
+
+var batchTxnsSem = make(chan struct{}, maxConcurrentBatchTxns)
+
+// acquireBatchTxns waits for a batch transaction slot, returning a function
+// that releases it. If ctx is done first, it writes 503 Service Unavailable and
+// returns nil.
+func acquireBatchTxns(ctx context.Context, w http.ResponseWriter) (release func()) {
+	select {
+	case batchTxnsSem <- struct{}{}:
+		return func() { <-batchTxnsSem }
+	case <-ctx.Done():
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable),
+			http.StatusServiceUnavailable)
+		return nil
+	}
+}
+
 func (c *appContext) getTransactions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -865,6 +888,12 @@ func (c *appContext) getTransactions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
+
+	release := acquireBatchTxns(ctx, w)
+	if release == nil {
+		return
+	}
+	defer release()
 
 	txns := make([]*apitypes.Tx, 0, len(txids))
 	for i := range txids {
@@ -899,6 +928,12 @@ func (c *appContext) getDecodedTransactions(w http.ResponseWriter, r *http.Reque
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
+
+	release := acquireBatchTxns(ctx, w)
+	if release == nil {
+		return
+	}
+	defer release()
 
 	txns := make([]*apitypes.TrimmedTx, 0, len(txids))
 	for i := range txids {
