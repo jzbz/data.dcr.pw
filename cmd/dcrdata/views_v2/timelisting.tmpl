@@ -32,6 +32,7 @@
       {{if len .Pages}}<div class="pager" style="margin-top:var(--sp-4)">{{range .Pages}}{{if eq .Link ""}}<span>{{.Str}}</span>{{else}}<a href="{{.Link}}"{{if .Active}} class="active"{{end}}>{{.Str}}</a>{{end}}{{end}}</div>{{end}}
       {{else}}<div class="alert">No data found.</div>{{end}}
     </main>
+    {{template "v2-footer"}}
   </div>
 </div>
 </body>

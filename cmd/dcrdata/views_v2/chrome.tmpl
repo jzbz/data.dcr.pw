@@ -1,12 +1,13 @@
 {{/*
   Shared chrome for the v2 (npm-free) pages: the document head, the fixed glass
-  sidebar, and the sticky topbar. Each page supplies its own
+  sidebar, the sticky topbar, and the colophon. Each page supplies its own
   <!DOCTYPE>/<html>/<body> (so it can set the body's data-controller list) and a
   .main column, then pulls in these partials:
 
     {{template "v2-head" (dict "Title" "Page Title" "Data" .)}}  - Title is the <title> text; Data is the page data (embeds CommonPageData)
     {{template "v2-sidebar" .}}           - argument is the page data (embeds CommonPageData)
     {{template "v2-topbar" .}}            - argument is the page data (price, search)
+    {{template "v2-footer"}}              - no argument; goes after </main>, inside .main
 */}}
 
 {{define "v2-head"}}
@@ -103,4 +104,22 @@
   {{if gt .DCRPrice 0.0}}<div class="price">{{if eq .PriceIndex "USD"}}${{end}}{{printf "%.2f" .DCRPrice}} <span class="text-muted">{{.PriceIndex}}</span></div>{{end}}
   <button class="icon-btn" type="button" data-action="theme#toggle" data-theme-target="glyph" aria-label="Toggle theme">☾</button>
 </div>
+{{end}}
+
+{{define "v2-footer"}}
+<footer class="colophon">
+  <div class="colophon-inner">
+    <div class="colophon-brand">
+      <img class="colophon-logo" src="{{asset "images/dcr.svg"}}" alt="" width="24" height="24">
+      <span class="colophon-name">dcrdata</span>
+      <p>A Decred block explorer for blocks, transactions, addresses, staking, governance and the treasury.</p>
+    </div>
+    <nav class="colophon-links" aria-label="Elsewhere">
+      <a href="https://dcr.pw/">dcr.pw<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>
+      <a href="https://docs.dcr.pw/">docs.dcr.pw<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>
+      <a href="https://map.dcr.pw/">map.dcr.pw<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>
+      <a href="https://jz.bz/">jz<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>
+    </nav>
+  </div>
+</footer>
 {{end}}

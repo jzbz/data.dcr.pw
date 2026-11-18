@@ -215,6 +215,31 @@
 
   .content { padding: var(--sp-6); max-width: var(--content-max); width: 100%; }
 
+  /* Colophon (v2-footer in chrome.tmpl), after docs.dcr.pw: the logo, name
+     and a one-line description on the left, the sister sites on the right.
+     margin-top: auto keeps it at the foot of a short page. */
+  .colophon {
+    margin-top: auto;
+    padding: 18px 0;
+    border-top: 1px solid var(--border);
+    background: var(--card);
+  }
+  .colophon-inner {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: 10px var(--sp-6);
+    max-width: var(--content-max);
+    padding: 0 var(--sp-6);
+  }
+  .colophon-brand { flex: 1 1 320px; } /* wraps to keep the links alongside */
+  .colophon-logo { display: inline-block; width: 24px; height: 24px; border-radius: 4px; vertical-align: middle; }
+  .colophon-name { margin-left: 6px; font-size: 16px; font-weight: 700; vertical-align: middle; color: var(--text); }
+  .colophon-brand p { margin-top: 4px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  .colophon-links { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-5); margin-left: auto; font-size: 13px; }
+  .colophon-links a { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+  .colophon-links a:hover,
+  .colophon-links a:focus-visible { color: var(--text); text-decoration: underline; }
+  .colophon-links svg { width: 13px; height: 13px; flex: none; }
+
   .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--turquoise); }
   .page-head { margin-bottom: var(--sp-5); }
   .page-head h1 { font-size: 34px; margin-top: var(--sp-2); }
